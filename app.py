@@ -13,9 +13,10 @@ API_KEY  = os.environ.get("API_KEY", "98e06cbc3c531496be35529357044cfc")
 API_BASE = "https://v3.football.api-sports.io"
 API_HEADERS = {"x-apisports-key": API_KEY}
 
-# Anthropic
-ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_KEY", "")
-ANTHROPIC_BASE = "https://api.anthropic.com/v1/messages"
+# Groq
+GROQ_KEY  = os.environ.get("GROQ_KEY", "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")
+GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT = """Você é APEX TRADE — uma inteligência artificial de elite especializada em trade esportivo de futebol, construída sobre a sabedoria coletiva dos 100 traders esportivos profissionais mais lucrativos do mundo.
 
@@ -27,7 +28,7 @@ REGRAS INEGOCIÁVEIS:
 3. NUNCA recomendar all-in
 4. Priorizar consistência acima de lucro rápido
 
-FORMATO — responda SEMPRE em JSON puro (sem markdown, sem backticks):
+FORMATO — responda SEMPRE em JSON puro (sem markdown, sem backticks, sem texto fora do JSON):
 
 {
   "type": "analysis",
@@ -68,12 +69,50 @@ FORMATO — responda SEMPRE em JSON puro (sem markdown, sem backticks):
   "marketAlert": null
 }
 
-Selecione TOP 5 jogos com maior EV+. Priorize qualidade."""
+Para chat: {"type":"chat","message":"resposta detalhada"}
+
+Selecione TOP 5 jogos com maior EV+. Priorize qualidade sobre quantidade."""
+
+
+def call_groq(messages, max_tokens=4000):
+    """Chama a API do Groq"""
+    res = requests.post(
+        GROQ_BASE,
+        headers={
+            "Authorization": f"Bearer {GROQ_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": GROQ_MODEL,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.7
+        },
+        timeout=60
+    )
+    if res.status_code != 200:
+        raise Exception(f"Groq error {res.status_code}: {res.text[:300]}")
+    data = res.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def parse_ai_response(raw):
+    """Tenta parsear JSON da resposta da IA"""
+    try:
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        # Pega só o JSON se tiver texto antes/depois
+        start = clean.find("{")
+        end = clean.rfind("}") + 1
+        if start >= 0 and end > start:
+            clean = clean[start:end]
+        return json.loads(clean)
+    except Exception:
+        return {"type": "chat", "message": raw}
 
 
 @app.route("/")
 def index():
-    return jsonify({"status": "APEX TRADE Backend online", "version": "2.0"})
+    return jsonify({"status": "APEX TRADE Backend online", "version": "3.0", "ai": "Groq/LLaMA-3.3-70b"})
 
 @app.route("/health")
 def health():
@@ -130,7 +169,6 @@ def fixtures_today():
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    """Recebe fixtures e retorna análise da IA — chamada server-side"""
     try:
         body = request.get_json()
         fixtures = body.get("fixtures", [])
@@ -144,39 +182,13 @@ def analyze():
 
 {json.dumps(fixtures, ensure_ascii=False, indent=2)}
 
-Como o melhor trader do mundo, selecione os TOP 5 jogos com maior EV+ potencial.
-Para cada um gere oportunidades detalhadas com odds estimadas de mercado, gestão para perfil "{risk_mode}".
+Analise como o melhor trader do mundo. Selecione os TOP 5 com maior EV+.
+Gere oportunidades detalhadas com odds estimadas de mercado para perfil "{risk_mode}".
 Responda APENAS com o JSON de análise."""
 
-        messages = history + [{"role": "user", "content": prompt}]
-
-        # Chama Anthropic server-side
-        res = requests.post(
-            ANTHROPIC_BASE,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01"
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 4000,
-                "system": SYSTEM_PROMPT,
-                "messages": messages
-            },
-            timeout=60
-        )
-
-        if res.status_code != 200:
-            return jsonify({"success": False, "error": f"Anthropic error {res.status_code}: {res.text[:300]}"}), 500
-
-        data = res.json()
-        raw = "".join(b.get("text", "") for b in data.get("content", []))
-
-        try:
-            parsed = json.loads(raw.replace("```json", "").replace("```", "").strip())
-        except Exception:
-            parsed = {"type": "chat", "message": raw}
+        messages = history[-4:] + [{"role": "user", "content": prompt}]
+        raw = call_groq(messages, max_tokens=4000)
+        parsed = parse_ai_response(raw)
 
         return jsonify({"success": True, "result": parsed})
 
@@ -186,7 +198,6 @@ Responda APENAS com o JSON de análise."""
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Chat livre com a IA"""
     try:
         body = request.get_json()
         message = body.get("message", "")
@@ -196,34 +207,9 @@ def chat():
         if not message:
             return jsonify({"success": False, "error": "Mensagem vazia"}), 400
 
-        messages = history + [{"role": "user", "content": f"{message}\n\n[Perfil: {risk_mode}]"}]
-
-        res = requests.post(
-            ANTHROPIC_BASE,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01"
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1000,
-                "system": SYSTEM_PROMPT,
-                "messages": messages
-            },
-            timeout=60
-        )
-
-        if res.status_code != 200:
-            return jsonify({"success": False, "error": f"Anthropic error {res.status_code}"}), 500
-
-        data = res.json()
-        raw = "".join(b.get("text", "") for b in data.get("content", []))
-
-        try:
-            parsed = json.loads(raw.replace("```json", "").replace("```", "").strip())
-        except Exception:
-            parsed = {"type": "chat", "message": raw}
+        messages = history[-6:] + [{"role": "user", "content": f"{message}\n\n[Perfil: {risk_mode}]"}]
+        raw = call_groq(messages, max_tokens=1000)
+        parsed = parse_ai_response(raw)
 
         return jsonify({"success": True, "result": parsed})
 
