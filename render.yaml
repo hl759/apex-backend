@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: apex-trade-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: RAPIDAPI_KEY
+        value: 348f64cc4bmsh83ca5a64d524287p1482b1jsn19e62eaf11f5
