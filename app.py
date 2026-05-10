@@ -481,20 +481,39 @@ Responda SEMPRE com JSON puro: {"type":"chat","message":"..."}"""
 
 
 # Prompt compacto para o modelo fallback (8B, 6k TPM)
-# Mantém o essencial — caberá junto com o prompt de análise nos 6k TPM
-FALLBACK_SYSTEM_PROMPT = """Você é APEX TRADE, trader esportivo profissional com 27 anos de experiência. Analise os jogos fornecidos e retorne as melhores oportunidades de trading.
+FALLBACK_SYSTEM_PROMPT = """Você é APEX TRADE, trader esportivo profissional com 27 anos de experiência. Analise os jogos fornecidos usando seu conhecimento de forma, H2H e contexto de cada liga.
 
-REGRAS:
-- Use APENAS os jogos da lista com IDs exatos
-- Aplique conhecimento de forma, H2H e contexto para estimar probabilidades
+REGRAS OBRIGATÓRIAS:
+- Use APENAS os jogos da lista com IDs numéricos exatos (só o número, sem "ID:")
+- Gere valores REAIS para cada campo — NÃO copie valores de exemplos
 - Selecione TOP 5 com maior EV+ para o perfil solicitado
 - Nunca invente jogos fora da lista
 
-ESTRUTURA de cada match:
-{"id":"ID_NUMERICO","homeTeam":"Nome exato","awayTeam":"Nome exato","league":"Liga","time":"HH:MM","status":"NS","score":"-","elapsed":0,"market":"Over 2.5","selection":"Over","odds":1.85,"probability":62,"ev":5.7,"confidence":72,"stake":2,"consistencyScore":74,"riskLevel":"médio","suspiciousMovement":false,"xgHome":1.6,"xgAway":1.2,"reasoning":"análise...","edge":"por que existe valor...","entryTiming":"pré-jogo","exitCondition":"cashout...","mainRisk":"risco...","anglesCount":3,"opportunities":[{"market":"Over 2.5","selection":"Over","odds":1.85}]}
+CAMPOS OBRIGATÓRIOS por jogo (gere valores reais baseados na sua análise):
+- id: string com o número do ID exato da lista
+- homeTeam / awayTeam: nomes exatos como na lista
+- league, time, status, score, elapsed: copie da lista
+- market: mercado escolhido (ex: "Over 2.5", "BTTS Sim", "Handicap -1.5")
+- selection: seleção (ex: "Over", "Sim", "Casa -1.5")
+- odds: odds estimadas entre 1.30 e 4.00 — CALCULE baseado na probabilidade
+- probability: inteiro 40-85 — sua estimativa real de probabilidade
+- ev: número 1.0-15.0 — calcule: (probability/100 * odds - 1) * 100
+- confidence: inteiro 50-90 — sua confiança no edge
+- stake: inteiro 1-5 — baseado no ev (ev<4→1, ev<7→2, ev<11→3, ev>=11→4)
+- consistencyScore: inteiro 0-100 — quantos fatores confirmam o edge
+- riskLevel: "baixo" se score>=70, "médio" se >=55, "alto" se <55
+- suspiciousMovement: false na maioria dos casos, true só se odds caíram >15% sem motivo
+- xgHome / xgAway: estimativa de xG entre 0.5 e 3.5
+- reasoning: análise fundamentada em 1-2 frases
+- edge: por que existe valor neste mercado
+- entryTiming: "pré-jogo" ou "kickoff" ou "ao vivo — min X"
+- exitCondition: quando sair
+- mainRisk: principal risco
+- anglesCount: inteiro 1-5
+- opportunities: array com o mercado principal: [{"market":"...","selection":"...","odds":X.XX}]
 
 Resposta: JSON puro sem markdown.
-Para análise: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}"""
+{"type":"analysis","matches":[...],"dailySummary":"2-3 frases sobre o dia","marketAlert":null}"""
 
 
 def _groq_post(model, messages, max_tokens, temperature):
@@ -640,6 +659,67 @@ def parse_ai_response(raw):
         return json.loads(clean)
     except Exception:
         return {"type": "chat", "message": raw}
+
+
+def _num(val, default, lo, hi):
+    """Converte val para float dentro de [lo, hi]; retorna default se inválido."""
+    try:
+        v = float(val)
+        if lo <= v <= hi:
+            return v
+        return max(lo, min(hi, v))
+    except (TypeError, ValueError):
+        return default
+
+
+def sanitize_matches(matches):
+    """
+    Garante que todos os campos numéricos são válidos.
+    Corrige NaN, None e valores fora de range que causariam NaN no frontend.
+    """
+    for m in matches:
+        odds         = _num(m.get("odds"),         1.85,  1.30, 4.00)
+        probability  = _num(m.get("probability"),  58,    40,   85)
+        confidence   = _num(m.get("confidence"),   65,    50,   90)
+        score_val    = _num(m.get("consistencyScore"), 65, 0,  100)
+        xg_home      = _num(m.get("xgHome"),       1.4,   0.5,  3.5)
+        xg_away      = _num(m.get("xgAway"),       1.2,   0.5,  3.5)
+        stake        = int(_num(m.get("stake"),     2,     1,    5))
+
+        # EV calculado se ausente/inválido: (prob * odds - 1) * 100
+        ev_raw = m.get("ev")
+        try:
+            ev = float(ev_raw)
+            if not (1.0 <= ev <= 15.0):
+                raise ValueError
+        except (TypeError, ValueError):
+            ev = round((probability / 100 * odds - 1) * 100, 1)
+            ev = max(1.0, min(15.0, ev))
+
+        # riskLevel derivado do consistencyScore
+        risk = m.get("riskLevel", "")
+        if risk not in ("baixo", "médio", "alto"):
+            risk = "baixo" if score_val >= 70 else ("médio" if score_val >= 55 else "alto")
+
+        m.update({
+            "odds":             round(odds, 2),
+            "probability":      int(probability),
+            "confidence":       int(confidence),
+            "consistencyScore": int(score_val),
+            "xgHome":           round(xg_home, 1),
+            "xgAway":           round(xg_away, 1),
+            "stake":            stake,
+            "ev":               round(ev, 1),
+            "riskLevel":        risk,
+            "suspiciousMovement": bool(m.get("suspiciousMovement", False)),
+        })
+
+        # Sincroniza odds dentro de opportunities também
+        for opp in m.get("opportunities", []):
+            opp_odds = _num(opp.get("odds"), odds, 1.30, 4.00)
+            opp["odds"] = round(opp_odds, 2)
+
+    return matches
 
 
 @app.route("/")
@@ -823,6 +903,7 @@ Responda APENAS com JSON puro (tipo "analysis")."""
                         match["status"] = fixture_map[fid].get("status", "NS")
 
             parsed["matches"] = validate_opportunities(parsed["matches"])
+            parsed["matches"] = sanitize_matches(parsed["matches"])
             parsed["validated"] = True
 
         return jsonify({"success": True, "result": parsed})
