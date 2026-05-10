@@ -419,11 +419,48 @@ REGRAS ABSOLUTAMENTE NÃO NEGOCIÁVEIS
 ═══════════════════════════════════════
 FORMATO DE RESPOSTA
 ═══════════════════════════════════════
-JSON puro, sem markdown, sem backticks, sem texto fora do JSON:
-Para análise: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}
-Para chat: {"type":"chat","message":"..."}
+JSON puro, sem markdown, sem backticks, sem texto fora do JSON.
 
-TOP 5 por EV+. Priorize PRÉ-LIVE sobre ao vivo. Ao vivo: só sugira mercados que ainda fazem sentido dado placar e minuto. Se não houver 5 boas entradas, retorne menos."""
+ESTRUTURA OBRIGATÓRIA de cada match dentro do array "matches":
+{
+  "id": "ID_NUMERICO_EXATO_DA_LISTA",
+  "homeTeam": "Nome exato como aparece na lista",
+  "awayTeam": "Nome exato como aparece na lista",
+  "league": "Nome da liga",
+  "time": "HH:MM",
+  "status": "NS",
+  "score": "-",
+  "elapsed": 0,
+  "market": "Over 2.5",
+  "selection": "Over",
+  "odds": 1.85,
+  "probability": 62,
+  "ev": 5.7,
+  "confidence": 72,
+  "stake": 2,
+  "consistencyScore": 74,
+  "riskLevel": "médio",
+  "suspiciousMovement": false,
+  "xgHome": 1.6,
+  "xgAway": 1.2,
+  "reasoning": "Análise fundamentada do jogo...",
+  "edge": "Por que o mercado está sub-precificando essa probabilidade...",
+  "entryTiming": "pré-jogo",
+  "exitCondition": "Cashout se sair gol fora ou a 1.40",
+  "mainRisk": "Time pode poupar titulares",
+  "anglesCount": 3,
+  "opportunities": [
+    {"market": "Over 2.5", "selection": "Over", "odds": 1.85}
+  ]
+}
+
+ATENÇÃO: o campo "id" deve ser APENAS o número (ex: "1234567"), não "ID:1234567".
+O campo "opportunities" é obrigatório — repita o mercado principal dentro dele.
+
+Resposta completa:
+{"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}
+
+TOP 5 por EV+. Priorize PRÉ-LIVE. Ao vivo: só mercados possíveis dado placar e minuto. Se não houver 5 boas entradas, retorne menos."""
 
 
 CHAT_SYSTEM_PROMPT = """Você é APEX TRADE — trader esportivo profissional com 27 anos de experiência. Você opera com capital próprio e de fundos privados, especializando-se em mercados de futebol europeu e sul-americano desde 1998.
@@ -473,23 +510,60 @@ def call_groq(messages, max_tokens=4000, model=None, system_prompt=None, tempera
     return content
 
 
+def _check_live_opp(market: str, selection: str, total_goals: int,
+                    home_goals: int, away_goals: int,
+                    minutes_remaining: int, elapsed: int, goal_diff: int) -> bool:
+    """Retorna False se a oportunidade for impossível/improvável ao vivo."""
+    m, s = market.lower(), selection.lower()
+
+    if (("under 0.5" in m or "under 0.5" in s) and total_goals >= 1): return False
+    if (("under 1.5" in m or "under 1.5" in s) and total_goals >= 2): return False
+    if (("under 2.5" in m or "under 2.5" in s) and total_goals >= 3): return False
+    if (("under 3.5" in m or "under 3.5" in s) and total_goals >= 4): return False
+    if (("under 4.5" in m or "under 4.5" in s) and total_goals >= 5): return False
+
+    if ("under 2.5" in m or "under 2.5" in s):
+        if total_goals >= 2 and minutes_remaining >= 25: return False
+    if ("under 1.5" in m or "under 1.5" in s):
+        if total_goals >= 1 and minutes_remaining >= 40: return False
+
+    if "btts" in m or "ambas marcam" in m or "ambos marcam" in m:
+        if ("não" in s or "no" in s) and home_goals >= 1 and away_goals >= 1:
+            return False
+        if ("sim" in s or "yes" in s):
+            if home_goals == 0 and minutes_remaining <= 15: return False
+            if away_goals == 0 and minutes_remaining <= 15: return False
+
+    if elapsed >= 75 and goal_diff >= 2:
+        losing_home = home_goals < away_goals
+        losing_away = away_goals < home_goals
+        if losing_home and ("home" in s or s.strip() == "1"): return False
+        if losing_away and ("away" in s or s.strip() == "2"): return False
+
+    if elapsed >= 80 and goal_diff >= 2:
+        if "empate" in s or "draw" in s or s.strip() == "x": return False
+
+    return True
+
+
 def validate_opportunities(matches):
-    """Remove entradas impossíveis ou improváveis dado o placar e minuto atual."""
+    """
+    Remove entradas impossíveis/improváveis dado placar e minuto.
+    Robusto: funciona com ou sem campo 'opportunities' no match.
+    """
     validated = []
     for match in matches:
-        score = match.get("score", "-")
+        score   = match.get("score", "-")
         elapsed = int(match.get("elapsed") or 0)
-        status = match.get("status", "")
+        status  = match.get("status", "")
         is_live = status in ["1H", "2H", "HT", "ET", "LIVE"]
 
-        home_goals = 0
-        away_goals = 0
-        total_goals = 0
+        home_goals = away_goals = total_goals = 0
         if score and score != "-" and "-" in score:
             try:
-                parts = score.split("-")
-                home_goals = int(parts[0])
-                away_goals = int(parts[1])
+                h, a = score.split("-", 1)
+                home_goals  = int(h)
+                away_goals  = int(a)
                 total_goals = home_goals + away_goals
             except Exception:
                 pass
@@ -497,64 +571,36 @@ def validate_opportunities(matches):
         minutes_remaining = max(0, 90 - elapsed)
         goal_diff = abs(home_goals - away_goals)
 
+        live_kwargs = dict(
+            total_goals=total_goals, home_goals=home_goals, away_goals=away_goals,
+            minutes_remaining=minutes_remaining, elapsed=elapsed, goal_diff=goal_diff,
+        )
+
+        opps = match.get("opportunities")
+
+        if opps is None:
+            # O AI não incluiu o campo — usa top-level market/selection se existir
+            top_market    = match.get("market", "")
+            top_selection = match.get("selection", "")
+            if top_market or top_selection:
+                opps = [{"market": top_market, "selection": top_selection,
+                         "odds": match.get("odds")}]
+            else:
+                # Nenhuma info de mercado — mantém o match sem filtrar
+                validated.append(match)
+                continue
+
         valid_opps = []
-        for opp in match.get("opportunities", []):
-            market = opp.get("market", "").lower()
-            selection = opp.get("selection", "").lower()
-            keep = True
-
-            if is_live:
-                # ── Unders matematicamente impossíveis ──
-                if ("under 0.5" in market or "under 0.5" in selection) and total_goals >= 1:
-                    keep = False
-                if ("under 1.5" in market or "under 1.5" in selection) and total_goals >= 2:
-                    keep = False
-                if ("under 2.5" in market or "under 2.5" in selection) and total_goals >= 3:
-                    keep = False
-                if ("under 3.5" in market or "under 3.5" in selection) and total_goals >= 4:
-                    keep = False
-                if ("under 4.5" in market or "under 4.5" in selection) and total_goals >= 5:
-                    keep = False
-
-                # ── Under improvável: placar alto com muito tempo restante ──
-                if ("under 2.5" in market or "under 2.5" in selection):
-                    if total_goals >= 2 and minutes_remaining >= 25:
-                        keep = False
-                if ("under 1.5" in market or "under 1.5" in selection):
-                    if total_goals >= 1 and minutes_remaining >= 40:
-                        keep = False
-
-                # ── BTTS impossíveis/improváveis ──
-                if "btts" in market or "ambas marcam" in market or "ambos marcam" in market:
-                    if "não" in selection or "no" in selection:
-                        if home_goals >= 1 and away_goals >= 1:
-                            keep = False
-                    if "sim" in selection or "yes" in selection:
-                        if home_goals == 0 and minutes_remaining <= 15:
-                            keep = False
-                        if away_goals == 0 and minutes_remaining <= 15:
-                            keep = False
-
-                # ── Resultado (1X2) improváveis ao vivo ──
-                if elapsed >= 75:
-                    if goal_diff >= 2:
-                        losing_home = home_goals < away_goals
-                        losing_away = away_goals < home_goals
-                        if losing_home and ("home" in selection or "1" == selection.strip()):
-                            keep = False
-                        if losing_away and ("away" in selection or "2" == selection.strip()):
-                            keep = False
-
-                # ── Empate improvável quando há diferença grande ──
-                if elapsed >= 80 and goal_diff >= 2:
-                    if "empate" in selection or "draw" in selection or "x" == selection.strip():
-                        keep = False
-
-            if keep:
+        for opp in opps:
+            m = opp.get("market", "")
+            s = opp.get("selection", "")
+            if not is_live or _check_live_opp(m, s, **live_kwargs):
                 valid_opps.append(opp)
 
         match["opportunities"] = valid_opps
-        if valid_opps:
+
+        # Mantém o match se: tem oportunidades válidas OU jogo pré-live (sem restrição de placar)
+        if valid_opps or not is_live:
             validated.append(match)
 
     return validated
@@ -714,14 +760,31 @@ Responda APENAS com JSON puro (tipo "analysis")."""
         raw = call_groq(messages, max_tokens=5000, model=GROQ_MODEL_ANALYSIS, temperature=0.2)
         parsed = parse_ai_response(raw)
 
-        # Validação 1: remove jogos inventados
+        # Validação 1: remove jogos inventados pelo AI
         if parsed.get("type") == "analysis":
-            real_ids = {str(f["id"]) for f in fixtures}
-            real_names = {f"{f['home']} x {f['away']}" for f in fixtures}
+            real_ids   = {str(f["id"]) for f in fixtures}
+            # Mapeamento nome normalizado → nome original (tolerante a variações)
+            real_names = {f"{f['home']} x {f['away']}".lower().strip() for f in fixtures}
+
+            def extract_id(raw_id):
+                """Extrai só o número, removendo prefixos como 'ID:' que o AI pode incluir."""
+                s = str(raw_id).strip()
+                if s.upper().startswith("ID:"):
+                    s = s[3:].strip()
+                return s.split("|")[0].strip()  # caso venha "ID:123 | ..."
+
             valid_matches = []
             for match in parsed.get("matches", []):
-                match_name = f"{match.get('homeTeam','')} x {match.get('awayTeam','')}"
-                if str(match.get("id","")) in real_ids or match_name in real_names:
+                mid       = extract_id(match.get("id", ""))
+                mname     = f"{match.get('homeTeam','')} x {match.get('awayTeam','')}".lower().strip()
+                id_ok     = mid in real_ids
+                name_ok   = mname in real_names
+                # Tolerância extra: qualquer real_name que contenha os dois times
+                fuzzy_ok  = any(
+                    match.get("homeTeam","").lower() in rn and match.get("awayTeam","").lower() in rn
+                    for rn in real_names
+                ) if not name_ok else True
+                if id_ok or name_ok or fuzzy_ok:
                     valid_matches.append(match)
             parsed["matches"] = valid_matches
 
