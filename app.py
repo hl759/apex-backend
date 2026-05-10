@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 import os
 import json
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -13,9 +14,14 @@ API_KEY  = os.environ.get("API_KEY", "98e06cbc3c531496be35529357044cfc")
 API_BASE = "https://v3.football.api-sports.io"
 API_HEADERS = {"x-apisports-key": API_KEY}
 
-# Cache de standings por dia — evita queimar a cota de 100 req/dia
+# ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
+
+# Cache de fixtures: evita req repetida quando usuário clica várias vezes
+# TTL de 4 minutos — dados de fixture não mudam tão rápido
+_fixtures_cache: dict = {"data": None, "ts": 0, "date": ""}
+_FIXTURES_TTL = 240  # segundos
 
 # Groq
 GROQ_KEY      = os.environ.get("GROQ_KEY", "")
@@ -79,8 +85,8 @@ def _api_get(path: str, timeout: int = 12) -> dict:
 def get_standings_for_leagues(league_ids: list) -> dict:
     """
     Retorna standings indexados por league_id.
-    Usa cache diário para não queimar a cota de 100 req/dia.
-    Tenta season=ano_atual, depois ano_atual-1 se não houver dados.
+    Cache diário — cada liga só consome 1 req/dia.
+    Limita novas requisições a 4 por chamada para proteger cota de 100 req/dia.
     """
     global _standings_cache, _standings_cache_date
     today = datetime.now().strftime("%Y-%m-%d")
@@ -90,10 +96,14 @@ def get_standings_for_leagues(league_ids: list) -> dict:
 
     result = {}
     current_year = datetime.now().year
+    new_requests = 0  # máx 4 novas req por chamada
     for lid in league_ids:
         if lid in _standings_cache:
             result[lid] = _standings_cache[lid]
             continue
+        if new_requests >= 4:  # protege cota diária
+            break
+        new_requests += 1
         data = {}
         for season in (current_year, current_year - 1):
             raw = _api_get(f"/standings?league={lid}&season={season}")
@@ -730,68 +740,82 @@ def index():
 def health():
     return jsonify({"ok": True, "time": datetime.now().isoformat()})
 
+def _parse_fixtures(response):
+    """Transforma resposta da API-Football em lista de fixtures filtrados."""
+    fixtures = []
+    for f in response:
+        status_short = f.get("fixture", {}).get("status", {}).get("short", "")
+        if status_short in ["FT", "AET", "PEN", "CANC", "PST", "ABD", "AWD", "WO"]:
+            continue
+        league_id = f.get("league", {}).get("id", 0)
+        if league_id not in BETANO_LEAGUE_IDS:
+            continue
+        fixture_date = f.get("fixture", {}).get("date", "")
+        try:
+            time_str = datetime.fromisoformat(
+                fixture_date.replace("Z", "+00:00")
+            ).strftime("%H:%M")
+        except Exception:
+            time_str = ""
+        home_score = f.get("goals", {}).get("home")
+        away_score = f.get("goals", {}).get("away")
+        score = f"{home_score}-{away_score}" if home_score is not None else "-"
+        fixtures.append({
+            "id":       str(f.get("fixture", {}).get("id", "")),
+            "home":     f.get("teams", {}).get("home", {}).get("name", ""),
+            "away":     f.get("teams", {}).get("away", {}).get("name", ""),
+            "league":   f.get("league", {}).get("name", ""),
+            "country":  f.get("league", {}).get("country", ""),
+            "time":     time_str,
+            "status":   status_short,
+            "score":    score,
+            "elapsed":  f.get("fixture", {}).get("status", {}).get("elapsed") or 0,
+            "league_id": league_id,
+        })
+    return fixtures[:20]
+
+
 @app.route("/fixtures/today")
 def fixtures_today():
     try:
         today = datetime.now().strftime("%Y-%m-%d")
+        now   = time.time()
+
+        # Serve do cache se ainda válido (evita queimar cota de 100 req/dia)
+        c = _fixtures_cache
+        if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
+            return jsonify({"success": True, "count": len(c["data"]),
+                            "fixtures": c["data"], "date": today, "cached": True})
+
         res = requests.get(
             f"{API_BASE}/fixtures?date={today}&timezone=America/Sao_Paulo",
-            headers=API_HEADERS,
-            timeout=15
+            headers=API_HEADERS, timeout=15
         )
+        if res.status_code == 429:
+            # Cota diária esgotada — retorna cache antigo se existir
+            if c["data"] is not None:
+                return jsonify({"success": True, "count": len(c["data"]),
+                                "fixtures": c["data"], "date": c["date"],
+                                "cached": True, "warning": "Cota API-Football esgotada, usando cache"})
+            return jsonify({"success": False,
+                            "error": "Cota diária da API-Football atingida. Tente novamente amanhã."}), 429
+
         if res.status_code != 200:
             return jsonify({"success": False, "error": f"API status {res.status_code}"}), 500
 
-        data = res.json()
+        data   = res.json()
         errors = data.get("errors", {})
         if errors:
             return jsonify({"success": False, "error": str(errors)}), 500
 
-        response = data.get("response", [])
-        fixtures = []
-        for f in response:
-            status_short = f.get("fixture", {}).get("status", {}).get("short", "")
+        fixtures = _parse_fixtures(data.get("response", []))
 
-            # Filtra jogos encerrados/cancelados
-            if status_short in ["FT", "AET", "PEN", "CANC", "PST", "ABD", "AWD", "WO"]:
-                continue
+        # Atualiza cache
+        c["data"] = fixtures
+        c["ts"]   = now
+        c["date"] = today
 
-            # Filtra apenas ligas da Betano
-            league_id = f.get("league", {}).get("id", 0)
-            if league_id not in BETANO_LEAGUE_IDS:
-                continue
-
-            fixture_date = f.get("fixture", {}).get("date", "")
-            try:
-                time_str = datetime.fromisoformat(
-                    fixture_date.replace("Z", "+00:00")
-                ).strftime("%H:%M")
-            except Exception:
-                time_str = ""
-
-            home_score = f.get("goals", {}).get("home")
-            away_score = f.get("goals", {}).get("away")
-            score = f"{home_score}-{away_score}" if home_score is not None else "-"
-
-            fixtures.append({
-                "id":      str(f.get("fixture", {}).get("id", "")),
-                "home":    f.get("teams", {}).get("home", {}).get("name", ""),
-                "away":    f.get("teams", {}).get("away", {}).get("name", ""),
-                "league":  f.get("league", {}).get("name", ""),
-                "country": f.get("league", {}).get("country", ""),
-                "time":    time_str,
-                "status":  status_short,
-                "score":   score,
-                "elapsed": f.get("fixture", {}).get("status", {}).get("elapsed") or 0,
-                "league_id": league_id,
-            })
-
-        return jsonify({
-            "success": True,
-            "count": len(fixtures),
-            "fixtures": fixtures[:20],
-            "date": today
-        })
+        return jsonify({"success": True, "count": len(fixtures), "fixtures": fixtures, "date": today})
 
     except Exception as ex:
         return jsonify({"success": False, "error": str(ex)}), 500
