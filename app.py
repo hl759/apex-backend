@@ -151,8 +151,7 @@ def call_groq(messages, max_tokens=4000, model=None):
             "model": model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
             "max_tokens": max_tokens,
-            "temperature": 0.2,
-            "reasoning_effort": "default"
+            "temperature": 0.2
         },
         timeout=90
     )
