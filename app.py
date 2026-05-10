@@ -118,7 +118,7 @@ FORMATO DE RESPOSTA — JSON puro, sem markdown, sem backticks, sem texto fora d
 Para análise: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}
 Para chat: {"type":"chat","message":"..."}
 
-Selecione TOP 5 jogos com maior EV+. Qualidade acima de quantidade. Se não houver 5 jogos com EV+ real, retorne menos — nunca force entradas ruins."""
+Selecione TOP 5 jogos com maior EV+. Priorize jogos PRÉ-LIVE sobre jogos ao vivo. Para jogos ao vivo, só sugira mercados que ainda fazem sentido dado o placar e minuto atual. Se não houver 5 boas entradas, retorne menos — nunca force entradas ruins."""
 
 
 def call_groq(messages, max_tokens=4000, model=None):
@@ -160,10 +160,9 @@ def validate_opportunities(matches):
         status = match.get("status", "")
         is_live = status in ["1H", "2H", "HT", "ET", "LIVE"]
 
-        # Extrai gols do placar
-        total_goals = 0
         home_goals = 0
         away_goals = 0
+        total_goals = 0
         if score and score != "-" and "-" in score:
             try:
                 parts = score.split("-")
@@ -182,42 +181,28 @@ def validate_opportunities(matches):
             keep = True
 
             if is_live:
-                # Under impossíveis
-                if "under 2.5" in market or "under 2.5" in selection:
-                    if total_goals >= 2:
-                        keep = False  # Já tem gols suficientes
-                    elif total_goals >= 1 and minutes_remaining > 50:
-                        keep = False  # Muito tempo, risco alto
-                if "under 1.5" in market or "under 1.5" in selection:
-                    if total_goals >= 1 and minutes_remaining > 30:
-                        keep = False
-                if "under 0.5" in market or "under 0.5" in selection:
-                    if total_goals >= 1:
-                        keep = False
-                if "under 3.5" in market or "under 3.5" in selection:
-                    if total_goals >= 3:
-                        keep = False
+                # Under impossíveis — só bloqueia se for matematicamente impossível
+                if ("under 2.5" in market or "under 2.5" in selection) and total_goals >= 3:
+                    keep = False
+                if ("under 1.5" in market or "under 1.5" in selection) and total_goals >= 2:
+                    keep = False
+                if ("under 0.5" in market or "under 0.5" in selection) and total_goals >= 1:
+                    keep = False
+                if ("under 3.5" in market or "under 3.5" in selection) and total_goals >= 4:
+                    keep = False
 
-                # BTTS impossíveis
-                if "btts" in market or "ambas marcam" in market:
-                    if "sim" in selection or "yes" in selection:
-                        if elapsed > 80 and (home_goals == 0 or away_goals == 0):
-                            keep = False
-                    if "não" in selection or "no" in selection:
+                # BTTS Não impossível — ambos já marcaram
+                if ("btts" in market or "ambas marcam" in market):
+                    if ("não" in selection or "no" in selection):
                         if home_goals >= 1 and away_goals >= 1:
                             keep = False
-
-                # Resultado impossível
-                if "1x2" in market or "resultado" in market:
-                    goal_diff = abs(home_goals - away_goals)
-                    if goal_diff >= 2 and elapsed >= 70:
-                        keep = False  # Virada improvável no fim
 
             if keep:
                 valid_opps.append(opp)
 
+        # Mantém jogo mesmo sem oportunidades válidas (pode ter outras)
+        match["opportunities"] = valid_opps
         if valid_opps:
-            match["opportunities"] = valid_opps
             validated.append(match)
 
     return validated
