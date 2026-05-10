@@ -16,8 +16,8 @@ API_HEADERS = {"x-apisports-key": API_KEY}
 # Groq
 GROQ_KEY  = os.environ.get("GROQ_KEY", "")
 GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL_ANALYSIS = "deepseek-r1-distill-llama-70b"  # Análise — máxima inteligência
-GROQ_MODEL_CHAT     = "llama-3.1-8b-instant"            # Chat — economiza tokens
+GROQ_MODEL_ANALYSIS = "qwen/qwen-3-32b"        # Raciocínio avançado — análise profunda
+GROQ_MODEL_CHAT     = "llama-3.1-8b-instant"   # Chat simples — economiza tokens
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -151,7 +151,8 @@ def call_groq(messages, max_tokens=4000, model=None):
             "model": model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
             "max_tokens": max_tokens,
-            "temperature": 0.2
+            "temperature": 0.2,
+            "reasoning_effort": "default"
         },
         timeout=90
     )
