@@ -16,8 +16,8 @@ API_HEADERS = {"x-apisports-key": API_KEY}
 # Groq
 GROQ_KEY  = os.environ.get("GROQ_KEY", "")
 GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL_ANALYSIS = "qwen/qwen3-32b"         # Raciocínio avançado — análise profunda
-GROQ_MODEL_CHAT     = "llama-3.1-8b-instant"   # Chat simples — economiza tokens
+GROQ_MODEL_ANALYSIS = "llama-3.3-70b-versatile"  # Melhor modelo produção Groq
+GROQ_MODEL_CHAT     = "llama-3.1-8b-instant"      # Chat simples — economiza tokens
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -246,7 +246,7 @@ def fixtures_today():
         return jsonify({
             "success": True,
             "count": len(fixtures),
-            "fixtures": fixtures[:20],
+            "fixtures": fixtures[:10],
             "date": today
         })
 
