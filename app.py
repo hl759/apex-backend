@@ -672,64 +672,77 @@ def parse_ai_response(raw):
 
 
 def _num(val, default, lo, hi):
-    """Converte val para float dentro de [lo, hi]; retorna default se inválido."""
+    """Converte val para float dentro de [lo, hi]; retorna default se inválido ou NaN."""
     try:
         v = float(val)
+        if v != v:  # NaN check (NaN != NaN em IEEE 754)
+            return default
         if lo <= v <= hi:
             return v
-        return max(lo, min(hi, v))
+        return float(max(lo, min(hi, v)))
     except (TypeError, ValueError):
         return default
 
 
 def sanitize_matches(matches):
     """
-    Garante que todos os campos numéricos são válidos.
-    Corrige NaN, None e valores fora de range que causariam NaN no frontend.
+    Garante que todos os campos numéricos são válidos no nível raiz E dentro
+    de opportunities — corrige NaN/None vindos do AI antes de chegar ao frontend.
     """
+    sanitized = []
     for m in matches:
-        odds         = _num(m.get("odds"),         1.85,  1.30, 4.00)
-        probability  = _num(m.get("probability"),  58,    40,   85)
-        confidence   = _num(m.get("confidence"),   65,    50,   90)
-        score_val    = _num(m.get("consistencyScore"), 65, 0,  100)
-        xg_home      = _num(m.get("xgHome"),       1.4,   0.5,  3.5)
-        xg_away      = _num(m.get("xgAway"),       1.2,   0.5,  3.5)
-        stake        = int(_num(m.get("stake"),     2,     1,    5))
-
-        # EV calculado se ausente/inválido: (prob * odds - 1) * 100
-        ev_raw = m.get("ev")
         try:
-            ev = float(ev_raw)
-            if not (1.0 <= ev <= 15.0):
-                raise ValueError
-        except (TypeError, ValueError):
-            ev = round((probability / 100 * odds - 1) * 100, 1)
-            ev = max(1.0, min(15.0, ev))
+            odds        = _num(m.get("odds"),            1.85, 1.30, 4.00)
+            probability = _num(m.get("probability"),     58,   40,   85)
+            confidence  = _num(m.get("confidence"),      65,   50,   90)
+            score_val   = _num(m.get("consistencyScore"),65,   0,    100)
+            xg_home     = _num(m.get("xgHome"),          1.4,  0.5,  3.5)
+            xg_away     = _num(m.get("xgAway"),          1.2,  0.5,  3.5)
+            stake       = int(_num(m.get("stake"),        2,    1,    5))
 
-        # riskLevel derivado do consistencyScore
-        risk = m.get("riskLevel", "")
-        if risk not in ("baixo", "médio", "alto"):
-            risk = "baixo" if score_val >= 70 else ("médio" if score_val >= 55 else "alto")
+            # EV: tenta usar o valor do AI; recalcula se ausente/inválido/NaN
+            ev_raw = m.get("ev")
+            try:
+                ev = float(ev_raw)
+                if ev != ev or not (1.0 <= ev <= 15.0):  # NaN ou fora do range
+                    raise ValueError
+            except (TypeError, ValueError):
+                ev = round((probability / 100 * odds - 1) * 100, 1)
+                ev = max(1.0, min(15.0, ev))
 
-        m.update({
-            "odds":             round(odds, 2),
-            "probability":      int(probability),
-            "confidence":       int(confidence),
-            "consistencyScore": int(score_val),
-            "xgHome":           round(xg_home, 1),
-            "xgAway":           round(xg_away, 1),
-            "stake":            stake,
-            "ev":               round(ev, 1),
-            "riskLevel":        risk,
-            "suspiciousMovement": bool(m.get("suspiciousMovement", False)),
-        })
+            risk = m.get("riskLevel", "")
+            if risk not in ("baixo", "médio", "alto"):
+                risk = "baixo" if score_val >= 70 else ("médio" if score_val >= 55 else "alto")
 
-        # Sincroniza odds dentro de opportunities também
-        for opp in m.get("opportunities", []):
-            opp_odds = _num(opp.get("odds"), odds, 1.30, 4.00)
-            opp["odds"] = round(opp_odds, 2)
+            m.update({
+                "odds":              round(odds, 2),
+                "probability":       int(probability),
+                "confidence":        int(confidence),
+                "consistencyScore":  int(score_val),
+                "xgHome":            round(xg_home, 1),
+                "xgAway":            round(xg_away, 1),
+                "stake":             stake,
+                "ev":                round(ev, 1),
+                "riskLevel":         risk,
+                "suspiciousMovement": bool(m.get("suspiciousMovement", False)),
+            })
 
-    return matches
+            # Sincroniza todos os campos numéricos dentro de opportunities[]
+            # (o frontend pode ler de lá em vez do nível raiz)
+            for opp in m.get("opportunities", []):
+                opp["odds"]        = round(_num(opp.get("odds"), odds, 1.30, 4.00), 2)
+                opp["probability"] = int(probability)
+                opp["ev"]          = round(ev, 1)
+                opp["stake"]       = stake
+                opp["confidence"]  = int(confidence)
+                opp["consistencyScore"] = int(score_val)
+
+            sanitized.append(m)
+        except Exception:
+            # Se um match específico falhar na sanitização, mantém como está
+            sanitized.append(m)
+
+    return sanitized
 
 
 @app.route("/")
