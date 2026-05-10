@@ -221,6 +221,9 @@ def validate_opportunities(matches):
             validated.append(match)
 
     return validated
+
+
+def parse_ai_response(raw):
     try:
         clean = raw.replace("```json", "").replace("```", "").strip()
         start = clean.find("{")
