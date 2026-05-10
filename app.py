@@ -20,9 +20,9 @@ _standings_cache_date: str = ""
 # Groq
 GROQ_KEY      = os.environ.get("GROQ_KEY", "")
 GROQ_BASE     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL_ANALYSIS  = "llama-3.3-70b-versatile"   # Análise principal
-GROQ_MODEL_CHAT      = "llama-3.1-8b-instant"       # Chat — economiza TPD (tokens/dia)
-GROQ_MODEL_FALLBACK  = "llama-3.1-8b-instant"       # Fallback quando 70B atinge limite diário
+GROQ_MODEL_ANALYSIS  = "llama-3.3-70b-versatile"  # Análise principal (6k TPM, 100k TPD)
+GROQ_MODEL_CHAT      = "llama-3.1-8b-instant"      # Chat rápido (6k TPM, 500k TPD)
+GROQ_MODEL_FALLBACK  = "gemma2-9b-it"              # Fallback: 15k TPM, 500k TPD — aguenta o prompt
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -500,8 +500,9 @@ def call_groq(messages, max_tokens=3000, model=None, system_prompt=None, tempera
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     res = _groq_post(model, full_messages, max_tokens, temperature)
 
-    # Fallback automático quando modelo principal atinge limite de tokens/dia (429)
-    if res.status_code == 429 and model != GROQ_MODEL_FALLBACK:
+    # Fallback: 429 (limite diário) ou 413 (request muito grande) → tenta gemma2-9b-it
+    if res.status_code in (429, 413) and model != GROQ_MODEL_FALLBACK:
+        # gemma2-9b-it tem 15k TPM e 500k TPD — aguenta o prompt completo
         res = _groq_post(GROQ_MODEL_FALLBACK, full_messages, max_tokens, temperature)
 
     if res.status_code != 200:
@@ -713,13 +714,13 @@ def analyze():
 
         # ── Busca dados em tempo real (não bloqueia se falhar) ──────────────
         unique_league_ids = list({f.get("league_id") for f in fixtures if f.get("league_id")})
-        # Limita a 7 ligas para não queimar cota diária
-        standings_data = get_standings_for_leagues(unique_league_ids[:7])
-        standings_ctx  = format_standings_context(standings_data, fixtures)
+        standings_data = get_standings_for_leagues(unique_league_ids[:6])  # máx 6 ligas/dia
+        # Limita standings a 8 jogos para manter prompt dentro do TPM dos modelos
+        standings_ctx  = format_standings_context(standings_data, fixtures[:8])
 
-        live_ids    = [f["id"] for f in live_fixtures]
-        live_data   = get_live_fixture_data(live_ids) if live_ids else {}
-        live_ctx    = format_live_context(live_data, live_fixtures)
+        live_ids   = [f["id"] for f in live_fixtures[:5]]  # máx 5 jogos ao vivo (2 req cada)
+        live_data  = get_live_fixture_data(live_ids) if live_ids else {}
+        live_ctx   = format_live_context(live_data, live_fixtures)
         # ────────────────────────────────────────────────────────────────────
 
         def format_fixture(f):
