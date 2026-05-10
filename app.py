@@ -21,7 +21,7 @@ _standings_cache_date: str = ""
 # Cache de fixtures: evita req repetida quando usuário clica várias vezes
 # TTL de 4 minutos — dados de fixture não mudam tão rápido
 _fixtures_cache: dict = {"data": None, "ts": 0, "date": ""}
-_FIXTURES_TTL = 240  # segundos
+_FIXTURES_TTL = 600  # segundos (10 min) — preserva cota de 100 req/dia
 
 # Groq
 GROQ_KEY      = os.environ.get("GROQ_KEY", "")
@@ -804,22 +804,27 @@ def fixtures_today():
             f"{API_BASE}/fixtures?date={today}&timezone=America/Sao_Paulo",
             headers=API_HEADERS, timeout=15
         )
-        if res.status_code == 429:
-            # Cota diária esgotada — retorna cache antigo se existir
+        # API-Football pode retornar 429 OU HTTP 200 com campo errors no corpo
+        is_rate_limited = res.status_code == 429
+        if res.status_code not in (200, 429):
+            return jsonify({"success": False, "error": f"API status {res.status_code}"}), 500
+
+        data = {}
+        if not is_rate_limited:
+            data = res.json()
+            errors = data.get("errors", {})
+            if errors:  # ex: {'requests': 'You have reached the request limit...'}
+                is_rate_limited = True
+
+        if is_rate_limited:
+            # Serve cache antigo se houver — qualquer data é melhor que erro
             if c["data"] is not None:
                 return jsonify({"success": True, "count": len(c["data"]),
                                 "fixtures": c["data"], "date": c["date"],
-                                "cached": True, "warning": "Cota API-Football esgotada, usando cache"})
+                                "cached": True,
+                                "warning": "Cota API-Football esgotada. Usando dados em cache."})
             return jsonify({"success": False,
-                            "error": "Cota diária da API-Football atingida. Tente novamente amanhã."}), 429
-
-        if res.status_code != 200:
-            return jsonify({"success": False, "error": f"API status {res.status_code}"}), 500
-
-        data   = res.json()
-        errors = data.get("errors", {})
-        if errors:
-            return jsonify({"success": False, "error": str(errors)}), 500
+                            "error": "Cota diária da API-Football atingida. Tente novamente após meia-noite."}), 429
 
         fixtures = _parse_fixtures(data.get("response", []))
 
@@ -850,13 +855,11 @@ def analyze():
 
         # ── Busca dados em tempo real (não bloqueia se falhar) ──────────────
         unique_league_ids = list({f.get("league_id") for f in fixtures if f.get("league_id")})
-        standings_data = get_standings_for_leagues(unique_league_ids[:6])  # máx 6 ligas/dia
-        # Limita standings a 8 jogos para manter prompt dentro do TPM dos modelos
-        standings_ctx  = format_standings_context(standings_data, fixtures[:8])
-
-        live_ids   = [f["id"] for f in live_fixtures[:5]]  # máx 5 jogos ao vivo (2 req cada)
-        live_data  = get_live_fixture_data(live_ids) if live_ids else {}
-        live_ctx   = format_live_context(live_data, live_fixtures)
+        # Standings e live stats desabilitados — a API-Football tem apenas 100 req/dia
+        # e o budget precisa ser preservado para o /fixtures/today (1 req/4min).
+        # O AI usa seu conhecimento interno para estimar forma e probabilidades.
+        standings_ctx = ""
+        live_ctx      = ""
         # ────────────────────────────────────────────────────────────────────
 
         def format_fixture(f):
