@@ -13,6 +13,10 @@ API_KEY  = os.environ.get("API_KEY", "98e06cbc3c531496be35529357044cfc")
 API_BASE = "https://v3.football.api-sports.io"
 API_HEADERS = {"x-apisports-key": API_KEY}
 
+# Cache de standings por dia — evita queimar a cota de 100 req/dia
+_standings_cache: dict = {}
+_standings_cache_date: str = ""
+
 # Groq
 GROQ_KEY  = os.environ.get("GROQ_KEY", "")
 GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
@@ -58,6 +62,190 @@ BETANO_LEAGUE_IDS = {
     235,  # Russian Premier League
 }
 
+# ── Funções de dados em tempo real (API-Football) ──────────────────────────
+
+def _api_get(path: str, timeout: int = 12) -> dict:
+    """Wrapper simples para GET na API-Football."""
+    try:
+        r = requests.get(f"{API_BASE}{path}", headers=API_HEADERS, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
+def get_standings_for_leagues(league_ids: list) -> dict:
+    """
+    Retorna standings indexados por league_id.
+    Usa cache diário para não queimar a cota de 100 req/dia.
+    Tenta season=ano_atual, depois ano_atual-1 se não houver dados.
+    """
+    global _standings_cache, _standings_cache_date
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _standings_cache_date != today:
+        _standings_cache = {}
+        _standings_cache_date = today
+
+    result = {}
+    current_year = datetime.now().year
+    for lid in league_ids:
+        if lid in _standings_cache:
+            result[lid] = _standings_cache[lid]
+            continue
+        data = {}
+        for season in (current_year, current_year - 1):
+            raw = _api_get(f"/standings?league={lid}&season={season}")
+            resp = raw.get("response", [])
+            if resp:
+                league_obj = resp[0].get("league", {})
+                standings_groups = league_obj.get("standings", [])
+                if standings_groups:
+                    data = {
+                        "league": league_obj.get("name", ""),
+                        "season": season,
+                        "standings": standings_groups[0],
+                    }
+                    break
+        _standings_cache[lid] = data
+        if data:
+            result[lid] = data
+    return result
+
+
+def get_live_fixture_data(fixture_ids: list) -> dict:
+    """
+    Para jogos ao vivo: busca eventos (gols, cartões, subs) e
+    estatísticas (posse, finalizações, escanteios).
+    Retorna dict indexado por fixture_id (string).
+    """
+    result = {}
+    for fid in fixture_ids:
+        events_raw = _api_get(f"/fixtures/events?fixture={fid}")
+        stats_raw  = _api_get(f"/fixtures/statistics?fixture={fid}")
+        events = events_raw.get("response", [])
+        stats  = stats_raw.get("response", [])
+        if events or stats:
+            result[str(fid)] = {"events": events, "statistics": stats}
+    return result
+
+
+def format_standings_context(standings_by_league: dict, fixtures: list) -> str:
+    """Gera bloco de texto com forma/stats para os times dos fixtures."""
+    if not standings_by_league:
+        return ""
+
+    team_info: dict = {}
+    for lid, data in standings_by_league.items():
+        for entry in data.get("standings", []):
+            name = entry.get("team", {}).get("name", "")
+            if not name:
+                continue
+            all_s  = entry.get("all", {})
+            goals  = all_s.get("goals", {})
+            played = all_s.get("played", 0)
+            gf     = goals.get("for", 0)
+            ga     = goals.get("against", 0)
+            team_info[name] = {
+                "rank":   entry.get("rank", "?"),
+                "pts":    entry.get("points", 0),
+                "form":   entry.get("form", ""),
+                "played": played,
+                "w":      all_s.get("win", 0),
+                "d":      all_s.get("draw", 0),
+                "l":      all_s.get("lose", 0),
+                "gf":     gf,
+                "ga":     ga,
+                "gpm":    round(gf / played, 2) if played else 0,
+                "gapm":   round(ga / played, 2) if played else 0,
+            }
+
+    lines = []
+    seen_pairs: set = set()
+    for f in fixtures:
+        home, away = f["home"], f["away"]
+        pair = f"{home}|{away}"
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        hi = team_info.get(home)
+        ai = team_info.get(away)
+        if not hi and not ai:
+            continue
+        lines.append(f"\n{home} x {away} ({f['league']}):")
+        if hi:
+            lines.append(
+                f"  {home}: #{hi['rank']} | {hi['pts']}pts | "
+                f"Forma:{hi['form'] or 'N/A'} | "
+                f"{hi['w']}V{hi['d']}E{hi['l']}D | "
+                f"Gols:{hi['gf']}F {hi['ga']}C | "
+                f"Média:{hi['gpm']} gols/jogo"
+            )
+        if ai:
+            lines.append(
+                f"  {away}: #{ai['rank']} | {ai['pts']}pts | "
+                f"Forma:{ai['form'] or 'N/A'} | "
+                f"{ai['w']}V{ai['d']}E{ai['l']}D | "
+                f"Gols:{ai['gf']}F {ai['ga']}C | "
+                f"Média:{ai['gpm']} gols/jogo"
+            )
+    return "\n".join(lines)
+
+
+def format_live_context(live_data: dict, live_fixtures: list) -> str:
+    """Gera bloco de texto com estatísticas e eventos dos jogos ao vivo."""
+    if not live_data:
+        return ""
+
+    STAT_KEYS = {
+        "Shots on Goal":   "Fin/gol",
+        "Shots off Goal":  "Fin/fora",
+        "Total Shots":     "Fin.total",
+        "Ball Possession": "Posse",
+        "Corner Kicks":    "Escanteios",
+        "Yellow Cards":    "Amarelos",
+        "Red Cards":       "Vermelhos",
+    }
+
+    lines = []
+    for f in live_fixtures:
+        fid = str(f["id"])
+        d = live_data.get(fid)
+        if not d:
+            continue
+        lines.append(f"\n{f['home']} x {f['away']} | {f['score']} | Min:{f.get('elapsed', 0)}")
+
+        for team_stats in d.get("statistics", []):
+            tname = team_stats.get("team", {}).get("name", "")
+            parts = []
+            for s in team_stats.get("statistics", []):
+                label = STAT_KEYS.get(s.get("type", ""))
+                if label and s.get("value") is not None:
+                    parts.append(f"{label}:{s['value']}")
+            if parts:
+                lines.append(f"  {tname}: {' | '.join(parts)}")
+
+        ev_lines = []
+        for ev in d.get("events", []):
+            etype  = ev.get("type", "")
+            detail = ev.get("detail", "")
+            min_e  = ev.get("time", {}).get("elapsed", "?")
+            tname  = ev.get("team", {}).get("name", "")
+            player = ev.get("player", {}).get("name", "")
+            if etype == "Goal":
+                ev_lines.append(f"GOL {min_e}' {tname} ({player})")
+            elif etype == "Card":
+                color = "AM" if "Yellow" in detail else "VM"
+                ev_lines.append(f"{color} {min_e}' {tname} ({player})")
+            elif etype == "subst":
+                ev_lines.append(f"Sub {min_e}' {tname}")
+        if ev_lines:
+            lines.append(f"  Eventos: {' | '.join(ev_lines)}")
+
+    return "\n".join(lines)
+
+
+# ───────────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Você é APEX TRADE — trader esportivo profissional com 27 anos de experiência nos mercados de futebol. Você começou em 1998 como liabilities manager em uma bookmaker europeia, migrou para o Betfair Exchange em 2003 onde operou como trader de alto volume por 6 anos, e desde 2010 opera capital próprio e de fundos quantitativos privados especializados em futebol.
 
 Sua trajetória real:
@@ -95,38 +283,41 @@ HIERARQUIA DE CONFIABILIDADE DE ODDS:
 4. Exchanges (Betfair): preço verdadeiro de consenso de mercado
 
 ═══════════════════════════════════════
+BASE DE CONHECIMENTO INTERNO
+═══════════════════════════════════════
+Você carrega em sua memória de treinamento dados extensos sobre:
+- Forma recente, médias de gols, xG e xGA de centenas de times em todas as ligas cobertas
+- Histórico H2H de confrontos diretos entre os times
+- Perfil ofensivo/defensivo de cada liga (média de gols, % BTTS, Over 2.5, etc.)
+- Contexto atual da temporada: posição na tabela, luta por título/rebaixamento, fadiga de copa
+- Padrões táticos dos times (pressão alta, bloqueio baixo, jogo direto, posse)
+
+USE SEMPRE esse conhecimento interno para estimar probabilidades. Você NÃO precisa de dados externos fornecidos no prompt — você JÁ TEM o conhecimento. Aplique-o ativamente em TODOS os jogos da lista.
+
+═══════════════════════════════════════
 FRAMEWORK DE ANÁLISE PRÉ-JOGO
 ═══════════════════════════════════════
-SEQUÊNCIA OBRIGATÓRIA antes de qualquer entrada:
+SEQUÊNCIA para cada jogo da lista:
 
-1. PRICING PRÓPRIO PRIMEIRO: Estime sua probabilidade antes de ver as odds
-   — Form recente (últimos 6 jogos, peso decrescente: 30/20/15/15/10/10%)
-   — H2H relevante (mesma competição, mesmo estádio, fase similar da temporada)
-   — Contexto motivacional (luta por título/rebaixamento, fase de copa, semana europeia)
-   — Fatores situacionais: fixture congestion, viagem, cansaço, rotação confirmada
-   — Expected Goals (xG) médio das últimas 5 partidas como base ofensiva/defensiva
+1. PRICING PRÓPRIO: Com base no seu conhecimento interno, estime a probabilidade real
+   — Forma dos últimos 6 jogos (peso maior para os mais recentes)
+   — H2H no mesmo contexto (liga, mando, fase da temporada)
+   — Motivação: posição na tabela, necessidade de pontos, jogo de copa vs liga
+   — Perfil ofensivo/defensivo (time costuma jogar aberto? Fecha atrás?)
+   — xG estimado com base no padrão recente dos times
 
-2. COMPARAÇÃO COM MERCADO: odds_implícita = 1/odds — compare com sua estimativa
-   — Se sua prob > prob_implícita em 5%+ → potencial EV+
-   — EV = (sua_prob × odds) - 1 — só entre se EV ≥ 3%
+2. IDENTIFICAÇÃO DE VALOR: Calcule onde o mercado provavelmente está errando
+   — EV = (sua_prob_estimada × odds_esperadas) - 1
+   — Mercados com maior edge frequente: Over/Under, BTTS, 1º tempo, handicap asiático
+   — 1X2 tem menor edge (mercado muito eficiente) — prefira mercados secundários
 
-3. VALIDAÇÃO DO EDGE: confirme por múltiplos ângulos independentes
-   — Ângulo 1: modelo estatístico (xG, gols esperados)
-   — Ângulo 2: contexto motivacional
-   — Ângulo 3: movimentação de mercado (favor ou contra?)
-   — Ângulo 4: H2H específico
-   — Quanto mais ângulos convergem, maior o consistencyScore
+3. SELEÇÃO DE MERCADO: Escolha o mercado onde seu edge é maior
+   — Se time ofensivo vs defesa fraca: Over é favorito natural
+   — Se dois times defensivos: Under e/ou BTTS Não
+   — Se favorito claro em casa: Handicap asiático pode dar melhor valor que 1X2
+   — Mercado de 1º tempo frequentemente subestimado
 
-4. SELEÇÃO DE MERCADO: escolha o mercado com maior edge, não o mais óbvio
-   — 1X2 tem menor edge na maioria dos jogos (muito eficiente)
-   — Over/Under e BTTS frequentemente oferecem mais valor
-   — Asian handicap elimina o empate e aumenta eficiência
-   — Mercados de 1º tempo podem ter mais valor que mercado completo
-
-5. TIMING DE ENTRADA:
-   — Pré-jogo: quanto mais próximo do kick-off, mais eficiente o mercado (menos edge)
-   — Melhor janela: 24-48h antes para capturar ineficiências de abertura
-   — Linha de fechamento como benchmark: se você entrou com odds melhores que fechamento, entrada foi boa independente do resultado
+4. TIMING: "pré-jogo" (até 2h antes) | "kickoff" (próximo do início) | "ao vivo — min X"
 
 ═══════════════════════════════════════
 EXPERTISE AO VIVO — 20 ANOS DE LEITURA
@@ -182,16 +373,19 @@ EFICIÊNCIA POR LIGA (impacta stake máximo recomendado):
 - MENOR eficiência (mais edge disponível): Série A/B brasileira, ligas Leste Europeu, Copa do Brasil → stake máximo 5%, mas com cautela
 
 ═══════════════════════════════════════
-RACIOCÍNIO TRANSPARENTE (OBRIGATÓRIO)
+OBRIGAÇÃO DE ANÁLISE
 ═══════════════════════════════════════
-Para cada oportunidade, você DEVE articular:
-- O edge específico: por que o mercado está errando aqui
-- O principal risco que pode invalidar a entrada
-- Condição de saída (quando fazer cashout/green)
-- Quantos ângulos independentes confirmam o edge
+Quando uma lista de jogos é fornecida, você DEVE analisar e selecionar as melhores oportunidades.
+Usar seu conhecimento interno para estimar probabilidades É suficiente — não espere dados externos.
 
-NUNCA FORCE ENTRADAS: Se os jogos disponíveis não oferecem edge real, diga claramente.
-"Hoje não há oportunidade com EV+ suficiente" é a resposta mais profissional possível.
+Para cada oportunidade selecionada, inclua:
+- "edge": por que existe valor nesse mercado (explique o raciocínio)
+- "entryTiming": quando entrar ("pré-jogo" / "kickoff" / "ao vivo — min X")
+- "exitCondition": quando sair ou fazer cashout
+- "mainRisk": o fator que pode invalidar a entrada
+- "anglesCount": quantos fatores independentes confirmam o edge (mínimo 1)
+
+Se genuinamente nenhum jogo oferece qualquer oportunidade razoável (ex: lista vazia ou todos os jogos são de baixíssimo valor), retorne matches vazio. Mas isso deve ser exceção rara, não regra.
 
 ═══════════════════════════════════════
 VALORES TÉCNICOS DE REFERÊNCIA
@@ -219,8 +413,8 @@ REGRAS ABSOLUTAMENTE NÃO NEGOCIÁVEIS
 1. JAMAIS invente jogos — use APENAS jogos da lista fornecida com IDs e nomes exatos
 2. NUNCA prometa lucro garantido ou recomende all-in
 3. Priorize EV+ real sobre narrativa ou emoção
-4. Nunca force entrada sem edge confirmado por pelo menos 2 ângulos independentes
-5. Máximo 5 entradas por análise — qualidade sobre quantidade
+4. Use seu conhecimento interno para estimar probabilidades — você tem os dados
+5. Máximo 5 entradas por análise — selecione as melhores da lista disponível
 
 ═══════════════════════════════════════
 FORMATO DE RESPOSTA
@@ -464,9 +658,19 @@ def analyze():
         if not fixtures:
             return jsonify({"success": False, "error": "Nenhum fixture enviado"}), 400
 
-        # Lista exata de jogos para a IA — ela NÃO pode sair dessa lista
-        live_fixtures = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
+        live_fixtures    = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures = [f for f in fixtures if f.get("status") not in ["1H", "2H", "HT", "ET", "LIVE"]]
+
+        # ── Busca dados em tempo real (não bloqueia se falhar) ──────────────
+        unique_league_ids = list({f.get("league_id") for f in fixtures if f.get("league_id")})
+        # Limita a 7 ligas para não queimar cota diária
+        standings_data = get_standings_for_leagues(unique_league_ids[:7])
+        standings_ctx  = format_standings_context(standings_data, fixtures)
+
+        live_ids    = [f["id"] for f in live_fixtures]
+        live_data   = get_live_fixture_data(live_ids) if live_ids else {}
+        live_ctx    = format_live_context(live_data, live_fixtures)
+        # ────────────────────────────────────────────────────────────────────
 
         def format_fixture(f):
             line = f"- ID:{f['id']} | {f['home']} x {f['away']} | {f['league']} ({f['country']}) | {f['time']} | Status:{f['status']}"
@@ -475,7 +679,13 @@ def analyze():
             return line
 
         prelive_list = "\n".join([format_fixture(f) for f in prelive_fixtures]) or "Nenhum"
-        live_list = "\n".join([format_fixture(f) for f in live_fixtures]) or "Nenhum"
+        live_list    = "\n".join([format_fixture(f) for f in live_fixtures]) or "Nenhum"
+
+        realtime_block = ""
+        if standings_ctx:
+            realtime_block += f"\n\nDADOS REAIS DE FORMA E CLASSIFICAÇÃO (API-Football):{standings_ctx}"
+        if live_ctx:
+            realtime_block += f"\n\nESTATÍSTICAS AO VIVO EM TEMPO REAL (API-Football):{live_ctx}"
 
         prompt = f"""JOGOS DE HOJE ({datetime.now().strftime('%d/%m/%Y %H:%M')}) — FONTE: API-FOOTBALL
 
@@ -483,20 +693,22 @@ PRÉ-JOGO:
 {prelive_list}
 
 AO VIVO:
-{live_list}
+{live_list}{realtime_block}
 
 PERFIL DO CLIENTE: {risk_mode}
 
-REGRAS OBRIGATÓRIAS:
-1. Use APENAS os jogos listados acima — IDs e nomes EXATOS
-2. Aplique seu framework completo de análise (pricing próprio → comparação com mercado → validação de edge)
-3. Para jogos ao vivo: verifique placar e minuto antes de qualquer sugestão de mercado
-4. Preencha TODOS os campos: edge, entryTiming, exitCondition, mainRisk, anglesCount
-5. Se um jogo não tem edge real, não inclua — qualidade acima de quantidade
-6. dailySummary: 2-3 frases com visão geral do dia (volume de jogos, qualidade das oportunidades, recomendação geral de exposição de banca)
-7. marketAlert: use para alertar sobre movimentos suspeitos ou oportunidades urgentes (null se não houver)
+INSTRUÇÕES:
+1. Use APENAS os jogos listados acima — IDs e nomes EXATOS como aparecem
+2. Os dados de forma, classificação e estatísticas ao vivo acima são REAIS e devem guiar sua análise
+3. Selecione os TOP 5 com maior EV+ potencial para o perfil "{risk_mode}"
+4. Para cada jogo: preencha edge, entryTiming, exitCondition, mainRisk, anglesCount
+5. Para jogos ao vivo: use as estatísticas em tempo real para identificar pressão e momentum
+6. dailySummary: 2-3 frases resumindo o dia (volume, qualidade das oportunidades, exposição recomendada)
+7. marketAlert: alerta urgente se houver oportunidade crítica ou movimento suspeito (null se não houver)
 
-Responda APENAS com o JSON de análise (tipo "analysis")."""
+IMPORTANTE: Você DEVE selecionar oportunidades dos jogos disponíveis. Retornar matches vazio só é aceitável se a lista for genuinamente vazia.
+
+Responda APENAS com JSON puro (tipo "analysis")."""
 
         messages = history[-4:] + [{"role": "user", "content": prompt}]
         raw = call_groq(messages, max_tokens=5000, model=GROQ_MODEL_ANALYSIS, temperature=0.2)
