@@ -18,10 +18,11 @@ _standings_cache: dict = {}
 _standings_cache_date: str = ""
 
 # Groq
-GROQ_KEY  = os.environ.get("GROQ_KEY", "")
-GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL_ANALYSIS = "llama-3.3-70b-versatile"  # Análise profunda
-GROQ_MODEL_CHAT     = "llama-3.3-70b-versatile"   # Mesmo modelo — qualidade do trader exige
+GROQ_KEY      = os.environ.get("GROQ_KEY", "")
+GROQ_BASE     = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL_ANALYSIS  = "llama-3.3-70b-versatile"   # Análise principal
+GROQ_MODEL_CHAT      = "llama-3.1-8b-instant"       # Chat — economiza TPD (tokens/dia)
+GROQ_MODEL_FALLBACK  = "llama-3.1-8b-instant"       # Fallback quando 70B atinge limite diário
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -479,27 +480,30 @@ Você responde em português, de forma conversacional mas substantiva. Sem flore
 Responda SEMPRE com JSON puro: {"type":"chat","message":"..."}"""
 
 
-def call_groq(messages, max_tokens=4000, model=None, system_prompt=None, temperature=0.2):
+def _groq_post(model, messages, max_tokens, temperature):
+    return requests.post(
+        GROQ_BASE,
+        headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+        json={"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature},
+        timeout=90
+    )
+
+
+def call_groq(messages, max_tokens=3000, model=None, system_prompt=None, temperature=0.2):
     if not GROQ_KEY:
         raise Exception("GROQ_KEY não configurada no ambiente")
     if model is None:
         model = GROQ_MODEL_ANALYSIS
     if system_prompt is None:
         system_prompt = SYSTEM_PROMPT
-    res = requests.post(
-        GROQ_BASE,
-        headers={
-            "Authorization": f"Bearer {GROQ_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": model,
-            "messages": [{"role": "system", "content": system_prompt}] + messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        },
-        timeout=90
-    )
+
+    full_messages = [{"role": "system", "content": system_prompt}] + messages
+    res = _groq_post(model, full_messages, max_tokens, temperature)
+
+    # Fallback automático quando modelo principal atinge limite de tokens/dia (429)
+    if res.status_code == 429 and model != GROQ_MODEL_FALLBACK:
+        res = _groq_post(GROQ_MODEL_FALLBACK, full_messages, max_tokens, temperature)
+
     if res.status_code != 200:
         raise Exception(f"Groq error {res.status_code}: {res.text[:300]}")
     content = res.json()["choices"][0]["message"]["content"]
@@ -757,7 +761,7 @@ IMPORTANTE: Você DEVE selecionar oportunidades dos jogos disponíveis. Retornar
 Responda APENAS com JSON puro (tipo "analysis")."""
 
         messages = history[-4:] + [{"role": "user", "content": prompt}]
-        raw = call_groq(messages, max_tokens=5000, model=GROQ_MODEL_ANALYSIS, temperature=0.2)
+        raw = call_groq(messages, max_tokens=3000, model=GROQ_MODEL_ANALYSIS, temperature=0.2)
         parsed = parse_ai_response(raw)
 
         # Validação 1: remove jogos inventados pelo AI
