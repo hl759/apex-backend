@@ -71,6 +71,30 @@ REGRAS ABSOLUTAMENTE CRÍTICAS:
 2. NUNCA prometa lucro garantido ou recomende all-in
 3. Priorize consistência e EV+ real acima de tudo
 
+LÓGICA SITUACIONAL AO VIVO — OBRIGATÓRIO:
+Antes de sugerir qualquer mercado ao vivo, analise placar + minuto + contexto:
+
+UNDER/OVER ao vivo:
+- NUNCA sugira Under 2.5 se placar já tem 2+ gols e ainda há 30+ minutos
+- NUNCA sugira Under 1.5 se placar já tem 1+ gol e ainda há 45+ minutos
+- NUNCA sugira Under 0.5 se já existe qualquer gol
+- Under só faz sentido se há POUCOS minutos restantes E placar baixo
+- Over 2.5 ao vivo só faz sentido se placar + xG indicam alta probabilidade de mais gols
+
+RESULTADO (1X2) ao vivo:
+- NUNCA sugira vitória do time perdendo por 2+ gols após minuto 70
+- Virada só é válida se há evidência estatística clara (xG, pressão, expulsão adversário)
+
+BTTS ao vivo:
+- NUNCA sugira BTTS Sim se um time já não pode marcar (placar 0-X, minuto 80+)
+- NUNCA sugira BTTS Não se ambos já marcaram
+
+HANDICAP ao vivo:
+- Considere sempre o placar atual + minutos restantes
+- Handicap deve refletir a realidade do jogo naquele momento
+
+REGRA GERAL: Se a entrada já é matematicamente impossível ou improvável dado o placar atual, DESCARTE e busque outro mercado ou outro jogo.
+
 METODOLOGIA DE ANÁLISE:
 - Calcule probabilidade real vs odds implícitas para encontrar EV+
 - Considere forma recente, histórico H2H, motivação e contexto da liga
@@ -79,13 +103,22 @@ METODOLOGIA DE ANÁLISE:
 - Ajuste stake pelo Kelly Criterion simplificado
 - Mercados: Over/Under 0.5/1.5/2.5/3.5, BTTS, 1X2, Handicap Asiático, 1º tempo, escanteios, cartões
 
-FORMATO DE RESPOSTA — JSON puro, sem markdown, sem backticks:
-- type: "analysis" para jogos, "chat" para conversa
-- matches: array com TOP 5 jogos de maior EV+
-- Cada jogo: id/homeTeam/awayTeam/league/country/time/status/score EXATAMENTE como na lista
-- Cada oportunidade: market, selection, odds, probability, confidence, ev, stake, timing, cashout, riskLevel (baixo/médio/alto), rationale, keyStats, suspiciousMovement, consistencyScore
-- dailySummary: resumo estratégico
-- marketAlert: alerta ou null"""
+VALORES CORRETOS DE REFERÊNCIA:
+- consistencyScore: inteiro entre 0 e 100 (ex: 72, 81, 65) — NUNCA decimais como 0.8
+- ev: número entre 1.0 e 15.0 representando % de valor esperado (ex: 4.5, 7.2, 11.0)
+- stake: inteiro entre 1 e 5 representando % da banca (ex: 1, 2, 3, 4, 5)
+- probability: inteiro entre 40 e 85 representando % (ex: 58, 67, 73)
+- confidence: inteiro entre 50 e 90 representando % (ex: 65, 72, 80)
+- odds: número entre 1.30 e 4.00 (ex: 1.75, 2.10, 1.85)
+- xgHome e xgAway: número entre 0.5 e 3.5 (ex: 1.4, 0.9, 2.1)
+- suspiciousMovement: true APENAS se odds caíram mais de 15% sem justificativa estatística, senão false
+- riskLevel: "baixo" se consistencyScore >= 70, "médio" se >= 55, "alto" se < 55
+
+FORMATO DE RESPOSTA — JSON puro, sem markdown, sem backticks, sem texto fora do JSON:
+Para análise: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}
+Para chat: {"type":"chat","message":"..."}
+
+Selecione TOP 5 jogos com maior EV+. Qualidade acima de quantidade. Se não houver 5 jogos com EV+ real, retorne menos — nunca force entradas ruins."""
 
 
 def call_groq(messages, max_tokens=4000, model=None):
@@ -118,7 +151,76 @@ def call_groq(messages, max_tokens=4000, model=None):
     return content
 
 
-def parse_ai_response(raw):
+def validate_opportunities(matches):
+    """Remove entradas impossíveis dado o placar e minuto atual"""
+    validated = []
+    for match in matches:
+        score = match.get("score", "-")
+        elapsed = int(match.get("elapsed") or 0)
+        status = match.get("status", "")
+        is_live = status in ["1H", "2H", "HT", "ET", "LIVE"]
+
+        # Extrai gols do placar
+        total_goals = 0
+        home_goals = 0
+        away_goals = 0
+        if score and score != "-" and "-" in score:
+            try:
+                parts = score.split("-")
+                home_goals = int(parts[0])
+                away_goals = int(parts[1])
+                total_goals = home_goals + away_goals
+            except Exception:
+                pass
+
+        minutes_remaining = max(0, 90 - elapsed)
+
+        valid_opps = []
+        for opp in match.get("opportunities", []):
+            market = opp.get("market", "").lower()
+            selection = opp.get("selection", "").lower()
+            keep = True
+
+            if is_live:
+                # Under impossíveis
+                if "under 2.5" in market or "under 2.5" in selection:
+                    if total_goals >= 2:
+                        keep = False  # Já tem gols suficientes
+                    elif total_goals >= 1 and minutes_remaining > 50:
+                        keep = False  # Muito tempo, risco alto
+                if "under 1.5" in market or "under 1.5" in selection:
+                    if total_goals >= 1 and minutes_remaining > 30:
+                        keep = False
+                if "under 0.5" in market or "under 0.5" in selection:
+                    if total_goals >= 1:
+                        keep = False
+                if "under 3.5" in market or "under 3.5" in selection:
+                    if total_goals >= 3:
+                        keep = False
+
+                # BTTS impossíveis
+                if "btts" in market or "ambas marcam" in market:
+                    if "sim" in selection or "yes" in selection:
+                        if elapsed > 80 and (home_goals == 0 or away_goals == 0):
+                            keep = False
+                    if "não" in selection or "no" in selection:
+                        if home_goals >= 1 and away_goals >= 1:
+                            keep = False
+
+                # Resultado impossível
+                if "1x2" in market or "resultado" in market:
+                    goal_diff = abs(home_goals - away_goals)
+                    if goal_diff >= 2 and elapsed >= 70:
+                        keep = False  # Virada improvável no fim
+
+            if keep:
+                valid_opps.append(opp)
+
+        if valid_opps:
+            match["opportunities"] = valid_opps
+            validated.append(match)
+
+    return validated
     try:
         clean = raw.replace("```json", "").replace("```", "").strip()
         start = clean.find("{")
@@ -237,7 +339,7 @@ Responda APENAS com o JSON de análise."""
         raw = call_groq(messages, max_tokens=4000, model=GROQ_MODEL_ANALYSIS)
         parsed = parse_ai_response(raw)
 
-        # Validação: remove jogos inventados pela IA
+        # Validação 1: remove jogos inventados
         if parsed.get("type") == "analysis":
             real_ids = {str(f["id"]) for f in fixtures}
             real_names = {f"{f['home']} x {f['away']}" for f in fixtures}
@@ -247,6 +349,18 @@ Responda APENAS com o JSON de análise."""
                 if str(match.get("id","")) in real_ids or match_name in real_names:
                     valid_matches.append(match)
             parsed["matches"] = valid_matches
+
+            # Validação 2: remove entradas impossíveis ao vivo
+            # Injeta elapsed e status nos matches para validação
+            fixture_map = {str(f["id"]): f for f in fixtures}
+            for match in parsed["matches"]:
+                fid = str(match.get("id",""))
+                if fid in fixture_map:
+                    match["elapsed"] = fixture_map[fid].get("elapsed", 0)
+                    if not match.get("status"):
+                        match["status"] = fixture_map[fid].get("status", "NS")
+
+            parsed["matches"] = validate_opportunities(parsed["matches"])
             parsed["validated"] = True
 
         return jsonify({"success": True, "result": parsed})
