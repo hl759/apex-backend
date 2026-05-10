@@ -20,9 +20,9 @@ _standings_cache_date: str = ""
 # Groq
 GROQ_KEY      = os.environ.get("GROQ_KEY", "")
 GROQ_BASE     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL_ANALYSIS  = "llama-3.3-70b-versatile"  # Análise principal (6k TPM, 100k TPD)
-GROQ_MODEL_CHAT      = "llama-3.1-8b-instant"      # Chat rápido (6k TPM, 500k TPD)
-GROQ_MODEL_FALLBACK  = "gemma2-9b-it"              # Fallback: 15k TPM, 500k TPD — aguenta o prompt
+GROQ_MODEL_ANALYSIS  = "llama-3.3-70b-versatile"  # Principal: análise profunda
+GROQ_MODEL_CHAT      = "llama-3.1-8b-instant"      # Chat: 6k TPM, 500k TPD
+GROQ_MODEL_FALLBACK  = "llama-3.1-8b-instant"      # Fallback com prompt compacto
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -480,6 +480,23 @@ Você responde em português, de forma conversacional mas substantiva. Sem flore
 Responda SEMPRE com JSON puro: {"type":"chat","message":"..."}"""
 
 
+# Prompt compacto para o modelo fallback (8B, 6k TPM)
+# Mantém o essencial — caberá junto com o prompt de análise nos 6k TPM
+FALLBACK_SYSTEM_PROMPT = """Você é APEX TRADE, trader esportivo profissional com 27 anos de experiência. Analise os jogos fornecidos e retorne as melhores oportunidades de trading.
+
+REGRAS:
+- Use APENAS os jogos da lista com IDs exatos
+- Aplique conhecimento de forma, H2H e contexto para estimar probabilidades
+- Selecione TOP 5 com maior EV+ para o perfil solicitado
+- Nunca invente jogos fora da lista
+
+ESTRUTURA de cada match:
+{"id":"ID_NUMERICO","homeTeam":"Nome exato","awayTeam":"Nome exato","league":"Liga","time":"HH:MM","status":"NS","score":"-","elapsed":0,"market":"Over 2.5","selection":"Over","odds":1.85,"probability":62,"ev":5.7,"confidence":72,"stake":2,"consistencyScore":74,"riskLevel":"médio","suspiciousMovement":false,"xgHome":1.6,"xgAway":1.2,"reasoning":"análise...","edge":"por que existe valor...","entryTiming":"pré-jogo","exitCondition":"cashout...","mainRisk":"risco...","anglesCount":3,"opportunities":[{"market":"Over 2.5","selection":"Over","odds":1.85}]}
+
+Resposta: JSON puro sem markdown.
+Para análise: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}"""
+
+
 def _groq_post(model, messages, max_tokens, temperature):
     return requests.post(
         GROQ_BASE,
@@ -500,10 +517,12 @@ def call_groq(messages, max_tokens=3000, model=None, system_prompt=None, tempera
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     res = _groq_post(model, full_messages, max_tokens, temperature)
 
-    # Fallback: 429 (limite diário) ou 413 (request muito grande) → tenta gemma2-9b-it
+    # Fallback: 429 (limite diário) ou 413 (request muito grande)
+    # Usa prompt compacto + menos tokens para caber no 8B (6k TPM)
     if res.status_code in (429, 413) and model != GROQ_MODEL_FALLBACK:
-        # gemma2-9b-it tem 15k TPM e 500k TPD — aguenta o prompt completo
-        res = _groq_post(GROQ_MODEL_FALLBACK, full_messages, max_tokens, temperature)
+        fallback_prompt = FALLBACK_SYSTEM_PROMPT if system_prompt == SYSTEM_PROMPT else system_prompt
+        fallback_messages = [{"role": "system", "content": fallback_prompt}] + messages
+        res = _groq_post(GROQ_MODEL_FALLBACK, fallback_messages, min(max_tokens, 2000), temperature)
 
     if res.status_code != 200:
         raise Exception(f"Groq error {res.status_code}: {res.text[:300]}")
