@@ -16,7 +16,8 @@ API_HEADERS = {"x-apisports-key": API_KEY}
 # Groq
 GROQ_KEY  = os.environ.get("GROQ_KEY", "")
 GROQ_BASE = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL_ANALYSIS = "deepseek-r1-distill-llama-70b"  # Análise — máxima inteligência
+GROQ_MODEL_CHAT     = "llama-3.1-8b-instant"            # Chat — economiza tokens
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
@@ -57,70 +58,89 @@ BETANO_LEAGUE_IDS = {
     235,  # Russian Premier League
 }
 
-SYSTEM_PROMPT = """Você é APEX TRADE — uma inteligência artificial de elite especializada em trade esportivo de futebol.
+SYSTEM_PROMPT = """Você é APEX TRADE — uma inteligência artificial de elite especializada em trade esportivo de futebol, construída sobre a sabedoria coletiva dos 100 traders esportivos profissionais mais lucrativos e consistentes do mundo.
 
-REGRA ABSOLUTAMENTE CRÍTICA:
-- Você JAMAIS inventa, cria ou sugere jogos que não estejam na lista fornecida
-- Você APENAS analisa os jogos exatos que receber no prompt
-- Se um jogo não está na lista, ele NÃO EXISTE para você
-- NUNCA adicione times ou partidas por conta própria
+Você raciocina como um especialista combinado de:
+- Trader esportivo profissional com 20+ anos de experiência
+- Analista quantitativo especializado em modelos probabilísticos
+- Cientista de dados com acesso a histórico de milhões de partidas
+- Especialista em leitura de mercado, odds e movimentação de casas de apostas
+- Psicólogo comportamental para evitar vieses cognitivos
 
-MISSÃO: Analisar os jogos fornecidos e identificar os TOP 5 com maior EV+.
+REGRAS ABSOLUTAMENTE CRÍTICAS:
+1. JAMAIS invente, crie ou sugira jogos fora da lista fornecida
+2. Use EXATAMENTE os nomes, IDs, ligas e horários da lista
+3. NUNCA prometa lucro garantido
+4. NUNCA recomende all-in
+5. Priorize consistência e EV+ real acima de tudo
 
-REGRAS DE OPERAÇÃO:
-1. NUNCA prometer lucro garantido
-2. SEMPRE informar o risco
-3. NUNCA recomendar all-in
-4. Priorizar consistência acima de lucro rápido
-5. Apenas analisar jogos da lista fornecida
+METODOLOGIA DE ANÁLISE (aplique para cada jogo):
+- Analise o contexto da liga e importância do jogo
+- Considere forma recente, histórico H2H, motivação dos times
+- Avalie padrões estatísticos: médias de gols, BTTS histórico, over/under
+- Calcule probabilidade real vs odds implícitas para encontrar EV+
+- Identifique o mercado com maior edge (vantagem matemática)
+- Defina timing preciso de entrada e saída
+- Ajuste stake pelo Kelly Criterion simplificado
 
-FORMATO — responda SEMPRE em JSON puro (sem markdown, sem backticks):
+MERCADOS PARA ANALISAR:
+- Over/Under 0.5, 1.5, 2.5, 3.5 gols
+- Ambas marcam (BTTS)
+- Resultado (1X2) e dupla chance
+- Asian Handicap
+- Gols no primeiro tempo
+- Total de escanteios
+- Total de cartões
+
+FORMATO — responda SEMPRE em JSON puro (sem markdown, sem backticks, sem texto fora do JSON):
 
 {
   "type": "analysis",
   "matches": [
     {
-      "id": "use o id exato fornecido",
-      "homeTeam": "use o nome exato fornecido",
-      "awayTeam": "use o nome exato fornecido",
-      "league": "use a liga exata fornecida",
-      "country": "use o país exato fornecido",
-      "time": "use o horário exato fornecido",
-      "status": "use o status exato fornecido",
-      "score": "use o placar exato fornecido",
+      "id": "id exato da lista",
+      "homeTeam": "nome exato da lista",
+      "awayTeam": "nome exato da lista",
+      "league": "liga exata da lista",
+      "country": "país exato da lista",
+      "time": "horário exato da lista",
+      "status": "status exato da lista",
+      "score": "placar exato da lista",
       "xgHome": 1.4,
       "xgAway": 1.0,
-      "matchContext": "análise técnica do jogo",
+      "matchContext": "análise técnica profunda: contexto, motivação, forma, fatores decisivos",
       "opportunities": [
         {
-          "market": "Over 2.5 Gols",
-          "selection": "Over 2.5",
+          "market": "nome do mercado",
+          "selection": "seleção específica",
           "odds": 1.85,
           "probability": 65,
           "confidence": 78,
           "ev": 5.2,
           "stake": 3,
-          "timing": "Pré-live",
-          "cashout": "Momento ideal de saída",
-          "riskLevel": "baixo",
-          "rationale": "Explicação técnica detalhada",
-          "keyStats": ["stat1", "stat2"],
+          "timing": "momento exato de entrada",
+          "cashout": "condição exata para cashout parcial ou total",
+          "riskLevel": "baixo|médio|alto",
+          "rationale": "raciocínio analítico profundo: por que essa entrada tem EV+, dados históricos, padrões identificados, edge matemático",
+          "keyStats": ["estatística 1", "estatística 2", "estatística 3"],
           "suspiciousMovement": false,
           "consistencyScore": 76
         }
       ]
     }
   ],
-  "dailySummary": "Resumo do dia com base apenas nos jogos fornecidos",
-  "marketAlert": null
+  "dailySummary": "resumo estratégico do dia baseado apenas nos jogos analisados",
+  "marketAlert": "alerta se houver movimentação suspeita ou valor excepcional, null se não houver"
 }
 
-Para chat: {"type":"chat","message":"resposta"}"""
+Para chat: {"type":"chat","message":"resposta analítica detalhada"}"""
 
 
-def call_groq(messages, max_tokens=4000):
+def call_groq(messages, max_tokens=4000, model=None):
     if not GROQ_KEY:
         raise Exception("GROQ_KEY não configurada no ambiente")
+    if model is None:
+        model = GROQ_MODEL_ANALYSIS
     res = requests.post(
         GROQ_BASE,
         headers={
@@ -128,16 +148,22 @@ def call_groq(messages, max_tokens=4000):
             "Content-Type": "application/json"
         },
         json={
-            "model": GROQ_MODEL,
+            "model": model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
             "max_tokens": max_tokens,
-            "temperature": 0.3  # Mais baixo = menos criativo = menos invenção
+            "temperature": 0.2
         },
-        timeout=60
+        timeout=90
     )
     if res.status_code != 200:
         raise Exception(f"Groq error {res.status_code}: {res.text[:300]}")
-    return res.json()["choices"][0]["message"]["content"]
+    content = res.json()["choices"][0]["message"]["content"]
+    # DeepSeek R1 inclui bloco <think>...</think> — remove antes de retornar
+    if "<think>" in content:
+        end_think = content.find("</think>")
+        if end_think != -1:
+            content = content[end_think + 8:].strip()
+    return content
 
 
 def parse_ai_response(raw):
@@ -256,7 +282,7 @@ Selecione os TOP 5 com maior potencial de EV+ para perfil "{risk_mode}".
 Responda APENAS com o JSON de análise."""
 
         messages = history[-4:] + [{"role": "user", "content": prompt}]
-        raw = call_groq(messages, max_tokens=4000)
+        raw = call_groq(messages, max_tokens=4000, model=GROQ_MODEL_ANALYSIS)
         parsed = parse_ai_response(raw)
 
         # Validação: remove jogos inventados pela IA
@@ -289,7 +315,7 @@ def chat():
             return jsonify({"success": False, "error": "Mensagem vazia"}), 400
 
         messages = history[-6:] + [{"role": "user", "content": f"{message}\n\n[Perfil: {risk_mode}]"}]
-        raw = call_groq(messages, max_tokens=1000)
+        raw = call_groq(messages, max_tokens=1000, model=GROQ_MODEL_CHAT)
         parsed = parse_ai_response(raw)
 
         return jsonify({"success": True, "result": parsed})
