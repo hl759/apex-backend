@@ -1289,65 +1289,101 @@ def _parse_fd_matches(matches: list) -> list:
     return fixtures
 
 
+def _fd_fetch_week(date_from: str, date_to: str, competitions: str | None = None) -> dict:
+    """Chama /matches da football-data.org e retorna dict com 'raw', 'http', 'error'."""
+    params: dict = {"dateFrom": date_from, "dateTo": date_to}
+    if competitions:
+        params["competitions"] = competitions
+    r = requests.get(
+        f"{FOOTBALL_DATA_BASE}/matches",
+        headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
+        params=params,
+        timeout=15,
+    )
+    if r.status_code != 200:
+        return {"raw": [], "http": r.status_code, "error": r.text[:300]}
+    body = r.json()
+    return {"raw": body.get("matches", []), "http": 200}
+
+
 def get_fixtures_from_football_data(date_str: str) -> list:
     """
     football-data.org — gratuita, sem limite diário, projetada para acesso
     de servidor. Requer FOOTBALL_DATA_KEY no ambiente.
-    Tenta hoje, amanhã e depois de amanhã até encontrar jogos.
+    Busca a semana inteira em 1 chamada; fallback sem filtro de competições.
     """
     if not FOOTBALL_DATA_KEY:
         _api_diag["football_data"] = {"ok": False, "error": "KEY_NOT_SET"}
         return []
 
-    base_dt = datetime.strptime(date_str, "%Y-%m-%d")
-    per_day_errors: list = []
-    for delta in range(3):
-        check_date = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
-        try:
-            r = requests.get(
-                f"{FOOTBALL_DATA_BASE}/matches",
-                headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
-                params={
-                    "dateFrom":     check_date,
-                    "dateTo":       check_date,
-                    "competitions": _FD_COMPETITIONS,
-                },
-                timeout=12,
-            )
-            diag = {"http": r.status_code, "date_checked": check_date, "ok": False}
-            if r.status_code == 429:
-                diag["error"] = "RATE_LIMITED_10rpm"
-                _api_diag["football_data"] = diag
-                return []
-            if r.status_code != 200:
-                diag["error"] = r.text[:300]
-                _api_diag["football_data"] = diag
-                per_day_errors.append({"date": check_date, "http": r.status_code, "error": r.text[:200]})
-                continue
-            body    = r.json()
-            raw     = body.get("matches", [])
-            diag["total_raw"]    = len(raw)
-            diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw})
-            fixtures = _parse_fd_matches(raw)
-            diag["total_parsed"] = len(fixtures)
-            diag["ok"]           = True
-            _api_diag["football_data"] = diag
-            if fixtures:
-                return fixtures[:25]
-            per_day_errors.append({"date": check_date, "http": 200, "total_raw": len(raw), "total_parsed": 0})
-        except Exception as e:
-            _api_diag["football_data"] = {"ok": False, "error": str(e), "date_checked": check_date}
-            return []
+    base_dt  = datetime.strptime(date_str, "%Y-%m-%d")
+    date_to  = (base_dt + timedelta(days=7)).strftime("%Y-%m-%d")
 
-    _api_diag["football_data"] = {
-        "ok": False,
-        "error": "NO_MATCHES_3_DAYS",
-        "dates_checked": [
-            (base_dt + timedelta(days=d)).strftime("%Y-%m-%d") for d in range(3)
-        ],
-        "per_day": per_day_errors,
-    }
-    return []
+    def _pick_first_day(raw: list) -> list:
+        """Agrupa por data e retorna fixtures do primeiro dia com jogos."""
+        by_date: dict = {}
+        for m in raw:
+            utc_str = m.get("utcDate", "")
+            day = utc_str[:10] if utc_str else ""
+            if day:
+                by_date.setdefault(day, []).append(m)
+        for offset in range(8):
+            day = (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            fixtures = _parse_fd_matches(by_date.get(day, []))
+            if fixtures:
+                return fixtures
+        return []
+
+    diag: dict = {"date_from": date_str, "date_to": date_to, "ok": False}
+    try:
+        # Tentativa 1: com filtro de competições
+        result = _fd_fetch_week(date_str, date_to, _FD_COMPETITIONS)
+        diag["http"]      = result["http"]
+        diag["with_comp"] = True
+        if result["http"] == 429:
+            diag["error"] = "RATE_LIMITED_10rpm"
+            _api_diag["football_data"] = diag
+            return []
+        if result["http"] == 200:
+            raw = result["raw"]
+            diag["total_raw_comp"] = len(raw)
+            fixtures = _pick_first_day(raw)
+            if fixtures:
+                diag["ok"] = True
+                diag["total_parsed"] = len(fixtures)
+                diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw})
+                _api_diag["football_data"] = diag
+                return fixtures[:25]
+
+        # Tentativa 2: sem filtro (retorna tudo acessível no plano)
+        result2 = _fd_fetch_week(date_str, date_to, None)
+        diag["http2"]      = result2["http"]
+        diag["with_comp2"] = False
+        if result2["http"] == 429:
+            diag["error"] = "RATE_LIMITED_10rpm"
+            _api_diag["football_data"] = diag
+            return []
+        if result2["http"] == 200:
+            raw2 = result2["raw"]
+            diag["total_raw_nocomp"] = len(raw2)
+            fixtures2 = _pick_first_day(raw2)
+            if fixtures2:
+                diag["ok"] = True
+                diag["total_parsed"] = len(fixtures2)
+                diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw2})
+                _api_diag["football_data"] = diag
+                return fixtures2[:25]
+
+        # Nenhuma tentativa encontrou jogos
+        diag["error"] = (
+            result.get("error") or result2.get("error") or "NO_MATCHES_7_DAYS"
+        )
+        _api_diag["football_data"] = diag
+        return []
+
+    except Exception as e:
+        _api_diag["football_data"] = {"ok": False, "error": str(e)}
+        return []
 
 
 def _filter_past_fixtures(fixtures: list) -> list:
@@ -1457,15 +1493,20 @@ def fixtures_today():
         fd_diag = _api_diag.get("football_data", {})
         if not FOOTBALL_DATA_KEY:
             msg = "FOOTBALL_DATA_KEY nao detectada no ambiente do Render."
-        elif fd_diag.get("http") and fd_diag["http"] != 200:
-            msg = f"football-data.org retornou HTTP {fd_diag['http']}: {fd_diag.get('error','')}"
-        elif fd_diag.get("error") == "NO_MATCHES_3_DAYS":
-            dates = fd_diag.get("dates_checked", [])
-            msg = f"Nenhum jogo encontrado nos próximos 3 dias ({', '.join(dates)}) nas ligas do plano gratuito."
-        elif fd_diag.get("ok") and fd_diag.get("total_raw", fd_diag.get("total", 0)) == 0:
-            msg = "Nenhum jogo encontrado hoje nas ligas cobertas pelo plano gratuito."
+        elif fd_diag.get("http") not in (None, 200) or fd_diag.get("http2") not in (None, 200):
+            bad_http = fd_diag.get("http") if fd_diag.get("http") not in (None, 200) else fd_diag.get("http2")
+            msg = (f"football-data.org retornou HTTP {bad_http}. "
+                   f"Verifique /fixtures/debug para detalhes. Erro: {fd_diag.get('error','')[:150]}")
+        elif fd_diag.get("error") == "NO_MATCHES_7_DAYS" or fd_diag.get("error") == "NO_MATCHES_3_DAYS":
+            raw_comp   = fd_diag.get("total_raw_comp", "?")
+            raw_nocomp = fd_diag.get("total_raw_nocomp", "?")
+            msg = (f"Sem jogos nos próximos 7 dias nas ligas do plano gratuito. "
+                   f"(raw_com_filtro={raw_comp}, raw_sem_filtro={raw_nocomp}) "
+                   f"Verifique /fixtures/debug.")
+        elif fd_diag.get("ok") and not fd_diag.get("total_parsed"):
+            msg = "API respondeu mas nenhum jogo válido encontrado. Verifique /fixtures/debug."
         else:
-            msg = f"Todas as fontes falharam. Diagnostico: {fd_diag}"
+            msg = f"Todas as fontes falharam. Verifique /fixtures/debug. Diag: {str(fd_diag)[:200]}"
         return jsonify({"success": False, "error": msg, "diag": _api_diag}), 503
 
     except Exception as ex:
