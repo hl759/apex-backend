@@ -138,7 +138,7 @@ _FD_STATUS = {
 }
 _FD_SKIP = {"FT", "PST", "CANC"}
 # Todas as competições acessíveis no plano gratuito do football-data.org
-_FD_COMPETITIONS = "PL,ELC,BL1,BL2,PD,SA,FL1,DED,PPL,CL,EC,BSA"
+_FD_COMPETITIONS = "PL,ELC,BL1,PD,SA,FL1,DED,PPL,CL,EC,BSA"
 
 # Diagnóstico em tempo real — atualizado a cada chamada às APIs de fixtures
 _api_diag: dict = {}
@@ -1300,6 +1300,7 @@ def get_fixtures_from_football_data(date_str: str) -> list:
         return []
 
     base_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    per_day_errors: list = []
     for delta in range(3):
         check_date = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
         try:
@@ -1310,7 +1311,6 @@ def get_fixtures_from_football_data(date_str: str) -> list:
                     "dateFrom":     check_date,
                     "dateTo":       check_date,
                     "competitions": _FD_COMPETITIONS,
-                    "limit":        100,
                 },
                 timeout=12,
             )
@@ -1320,8 +1320,9 @@ def get_fixtures_from_football_data(date_str: str) -> list:
                 _api_diag["football_data"] = diag
                 return []
             if r.status_code != 200:
-                diag["error"] = r.text[:200]
+                diag["error"] = r.text[:300]
                 _api_diag["football_data"] = diag
+                per_day_errors.append({"date": check_date, "http": r.status_code, "error": r.text[:200]})
                 continue
             body    = r.json()
             raw     = body.get("matches", [])
@@ -1333,6 +1334,7 @@ def get_fixtures_from_football_data(date_str: str) -> list:
             _api_diag["football_data"] = diag
             if fixtures:
                 return fixtures[:25]
+            per_day_errors.append({"date": check_date, "http": 200, "total_raw": len(raw), "total_parsed": 0})
         except Exception as e:
             _api_diag["football_data"] = {"ok": False, "error": str(e), "date_checked": check_date}
             return []
@@ -1343,6 +1345,7 @@ def get_fixtures_from_football_data(date_str: str) -> list:
         "dates_checked": [
             (base_dt + timedelta(days=d)).strftime("%Y-%m-%d") for d in range(3)
         ],
+        "per_day": per_day_errors,
     }
     return []
 
