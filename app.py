@@ -102,6 +102,27 @@ ESPN_STATUS_MAP = {
 }
 _ESPN_SKIP = {"FT", "PST", "CANC", "PEN"}
 
+# ── SofaScore — API pública, resposta única para todos os jogos do dia ──────
+SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+_SOFASCORE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+# SofaScore status codes → interno
+_SS_STATUS = {
+    0: "NS",  6: "1H",  31: "HT",  7: "2H",
+    41: "ET", 61: "HT", 100: "FT", 110: "FT",
+    70: "CANC", 60: "PST", 120: "PEN", 66: "PEN",
+}
+_SS_SKIP = {"FT", "CANC", "PST", "PEN"}
+
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
@@ -1103,6 +1124,89 @@ def get_fixtures_from_espn(date_str: str) -> list:
     return all_fixtures[:25]
 
 
+def get_fixtures_from_sofascore(date_str: str) -> list:
+    """
+    Busca todos os jogos de futebol do dia na SofaScore (API pública, 1 chamada).
+    Filtra pelas ligas da Betano; fallback para todos os jogos se filtro vazio.
+    """
+    try:
+        url = f"{SOFASCORE_BASE}/sport/football/scheduled-events/{date_str}"
+        r = requests.get(url, headers=_SOFASCORE_HEADERS, timeout=12)
+        if r.status_code != 200:
+            return []
+        events = r.json().get("events") or []
+    except Exception:
+        return []
+
+    betano = []
+    others = []
+
+    for ev in events:
+        status_code = ev.get("status", {}).get("code", 0)
+        status = _SS_STATUS.get(status_code, "NS")
+        if status in _SS_SKIP:
+            continue
+
+        home_team = ev.get("homeTeam", {}).get("name", "")
+        away_team = ev.get("awayTeam", {}).get("name", "")
+        if not home_team or not away_team:
+            continue
+
+        # Horário: startTimestamp é UTC
+        start_ts = ev.get("startTimestamp", 0)
+        try:
+            utc_dt   = datetime.utcfromtimestamp(start_ts)
+            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+        except Exception:
+            time_str = ""
+
+        # Placar
+        hs = ev.get("homeScore", {}).get("current")
+        as_ = ev.get("awayScore", {}).get("current")
+        score = f"{hs}-{as_}" if hs is not None and as_ is not None else "-"
+
+        # Minutos decorridos para jogos ao vivo
+        elapsed = 0
+        if status in ("1H", "2H", "ET"):
+            period_ts = ev.get("time", {}).get("currentPeriodStartTimestamp", 0)
+            if period_ts:
+                mins = (time.time() - period_ts) / 60
+                if status == "2H":
+                    elapsed = min(90, 45 + int(mins))
+                else:
+                    elapsed = min(45, int(mins))
+        elif status == "HT":
+            elapsed = 45
+
+        tournament  = ev.get("tournament", {})
+        league_name = (tournament.get("uniqueTournament") or {}).get("name", "") \
+                      or tournament.get("name", "")
+        country     = ev.get("homeTeam", {}).get("country", {}).get("name", "")
+
+        fixture = {
+            "id":        f"ss_{ev.get('id', '')}",
+            "home":      home_team,
+            "away":      away_team,
+            "league":    league_name,
+            "country":   country,
+            "time":      time_str,
+            "status":    status,
+            "score":     score,
+            "elapsed":   elapsed,
+            "league_id": 0,
+            "source":    "sofascore",
+        }
+
+        if any(kw in league_name.lower() for kw in BETANO_LEAGUES_TSDB):
+            betano.append(fixture)
+        else:
+            others.append(fixture)
+
+    result = betano if betano else others
+    result.sort(key=lambda f: f.get("time", ""))
+    return result[:25]
+
+
 def _filter_past_fixtures(fixtures: list) -> list:
     """
     Remove fixtures com status 'NS' cujo horário de kickoff já passou.
@@ -1161,37 +1265,35 @@ def fixtures_today():
                 is_rate_limited = True
 
         if is_rate_limited:
-            # 1ª tentativa: ESPN API (pública, sem chave, sem limite diário)
+            # 1ª: SofaScore (única chamada, cobre todas as ligas)
+            ss = get_fixtures_from_sofascore(today)
+            if ss:
+                c["data"] = ss; c["ts"] = now; c["date"] = today
+                return jsonify({"success": True, "count": len(ss),
+                                "fixtures": ss, "date": today, "source": "sofascore"})
+
+            # 2ª: ESPN (chamadas paralelas por liga)
             espn = get_fixtures_from_espn(today)
             if espn:
-                c["data"] = espn
-                c["ts"]   = now
-                c["date"] = today
-                return jsonify({
-                    "success": True, "count": len(espn), "fixtures": espn, "date": today,
-                    "source": "espn",
-                })
+                c["data"] = espn; c["ts"] = now; c["date"] = today
+                return jsonify({"success": True, "count": len(espn),
+                                "fixtures": espn, "date": today, "source": "espn"})
 
-            # 2ª tentativa: TheSportsDB
+            # 3ª: TheSportsDB
             tsdb = get_fixtures_from_thesportsdb(today)
             if tsdb:
-                c["data"] = tsdb
-                c["ts"]   = now
-                c["date"] = today
-                return jsonify({
-                    "success": True, "count": len(tsdb), "fixtures": tsdb, "date": today,
-                    "source": "thesportsdb",
-                })
+                c["data"] = tsdb; c["ts"] = now; c["date"] = today
+                return jsonify({"success": True, "count": len(tsdb),
+                                "fixtures": tsdb, "date": today, "source": "thesportsdb"})
 
-            # Último recurso: cache antigo
+            # Cache antigo
             if c["data"] is not None:
                 stale = _filter_past_fixtures(c["data"])
                 return jsonify({"success": True, "count": len(stale),
-                                "fixtures": stale, "date": c["date"],
-                                "cached": True,
-                                "warning": "Usando dados em cache. Fontes alternativas indisponíveis."})
+                                "fixtures": stale, "date": c["date"], "cached": True,
+                                "warning": "Usando dados em cache."})
             return jsonify({"success": False,
-                            "error": "Sem dados de fixtures disponíveis no momento. Tente novamente em instantes."}), 503
+                            "error": "Sem dados disponíveis. Visite /fixtures/debug para diagnóstico."}), 503
 
         fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
 
@@ -1339,6 +1441,69 @@ def chat():
 
     except Exception as ex:
         return jsonify({"success": False, "error": str(ex)}), 500
+
+
+@app.route("/fixtures/debug")
+def fixtures_debug():
+    """Testa conectividade com cada fonte de fixtures e retorna diagnóstico."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    results = {}
+
+    # Testa SofaScore
+    try:
+        url = f"{SOFASCORE_BASE}/sport/football/scheduled-events/{today}"
+        r = requests.get(url, headers=_SOFASCORE_HEADERS, timeout=10)
+        body = r.json() if r.status_code == 200 else {}
+        results["sofascore"] = {
+            "http": r.status_code,
+            "events": len(body.get("events") or []),
+            "ok": r.status_code == 200,
+        }
+    except Exception as e:
+        results["sofascore"] = {"http": None, "events": 0, "ok": False, "error": str(e)}
+
+    # Testa ESPN (só eng.1 para diagnóstico rápido)
+    try:
+        url = "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard"
+        r = requests.get(url, headers=_ESPN_HEADERS,
+                         params={"dates": today.replace("-", "")}, timeout=8)
+        body = r.json() if r.status_code == 200 else {}
+        results["espn_eng1"] = {
+            "http": r.status_code,
+            "events": len(body.get("events") or []),
+            "ok": r.status_code == 200,
+        }
+    except Exception as e:
+        results["espn_eng1"] = {"http": None, "events": 0, "ok": False, "error": str(e)}
+
+    # Testa TheSportsDB
+    try:
+        url = f"{THESPORTSDB_BASE}/eventsday.php?d={today}&s=Soccer"
+        r = requests.get(url, timeout=10)
+        body = r.json() if r.status_code == 200 else {}
+        results["thesportsdb"] = {
+            "http": r.status_code,
+            "events": len(body.get("events") or []),
+            "ok": r.status_code == 200 and bool(body.get("events")),
+        }
+    except Exception as e:
+        results["thesportsdb"] = {"http": None, "events": 0, "ok": False, "error": str(e)}
+
+    # Testa API-Football
+    try:
+        r = requests.get(f"{API_BASE}/status", headers=API_HEADERS, timeout=8)
+        body = r.json() if r.status_code == 200 else {}
+        sub = body.get("response", {}).get("requests", {})
+        results["api_football"] = {
+            "http": r.status_code,
+            "requests_used": sub.get("current", "?"),
+            "requests_limit": sub.get("limit_day", "?"),
+            "ok": r.status_code == 200,
+        }
+    except Exception as e:
+        results["api_football"] = {"http": None, "ok": False, "error": str(e)}
+
+    return jsonify({"date": today, "sources": results})
 
 
 if __name__ == "__main__":
