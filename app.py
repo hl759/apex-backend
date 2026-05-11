@@ -137,6 +137,8 @@ _FD_STATUS = {
     "CANCELLED": "CANC", "SUSPENDED": "PST",
 }
 _FD_SKIP = {"FT", "PST", "CANC"}
+# Todas as competições acessíveis no plano gratuito do football-data.org
+_FD_COMPETITIONS = "PL,ELC,BL1,BL2,PD,SA,FL1,DED,PPL,CL,EC,BSA"
 
 # Diagnóstico em tempo real — atualizado a cada chamada às APIs de fixtures
 _api_diag: dict = {}
@@ -1237,40 +1239,7 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
     return result[:25]
 
 
-def get_fixtures_from_football_data(date_str: str) -> list:
-    """
-    football-data.org — gratuita, sem limite diário, projetada para acesso
-    de servidor. Requer FOOTBALL_DATA_KEY no ambiente.
-    """
-    if not FOOTBALL_DATA_KEY:
-        _api_diag["football_data"] = {"ok": False, "error": "KEY_NOT_SET"}
-        return []
-    try:
-        r = requests.get(
-            f"{FOOTBALL_DATA_BASE}/matches",
-            headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
-            params={"dateFrom": date_str, "dateTo": date_str},
-            timeout=12,
-        )
-        diag = {"http": r.status_code, "ok": False}
-        if r.status_code == 429:
-            diag["error"] = "RATE_LIMITED_10rpm"
-            _api_diag["football_data"] = diag
-            return []
-        if r.status_code != 200:
-            diag["error"] = r.text[:300]
-            _api_diag["football_data"] = diag
-            return []
-        body    = r.json()
-        matches = body.get("matches", [])
-        diag["ok"]          = True
-        diag["total"]       = len(matches)
-        diag["competitions"] = list({m.get("competition", {}).get("name","") for m in matches})
-        _api_diag["football_data"] = diag
-    except Exception as e:
-        _api_diag["football_data"] = {"ok": False, "error": str(e)}
-        return []
-
+def _parse_fd_matches(matches: list) -> list:
     fixtures = []
     for m in matches:
         status_str = m.get("status", "SCHEDULED")
@@ -1280,7 +1249,6 @@ def get_fixtures_from_football_data(date_str: str) -> list:
 
         elapsed = 45 if status == "HT" else 0
 
-        # Horário UTC → BRT
         utc_str = m.get("utcDate", "")
         try:
             utc_dt   = datetime.strptime(utc_str[:16], "%Y-%m-%dT%H:%M")
@@ -1295,9 +1263,9 @@ def get_fixtures_from_football_data(date_str: str) -> list:
         if not home or not away:
             continue
 
-        ft   = (m.get("score") or {}).get("fullTime") or {}
-        hs   = ft.get("home")
-        as_  = ft.get("away")
+        ft    = (m.get("score") or {}).get("fullTime") or {}
+        hs    = ft.get("home")
+        as_   = ft.get("away")
         score = f"{hs}-{as_}" if hs is not None and as_ is not None else "-"
 
         comp        = m.get("competition") or {}
@@ -1317,9 +1285,66 @@ def get_fixtures_from_football_data(date_str: str) -> list:
             "league_id": 0,
             "source":    "football-data",
         })
-
     fixtures.sort(key=lambda f: f.get("time", ""))
-    return fixtures[:25]
+    return fixtures
+
+
+def get_fixtures_from_football_data(date_str: str) -> list:
+    """
+    football-data.org — gratuita, sem limite diário, projetada para acesso
+    de servidor. Requer FOOTBALL_DATA_KEY no ambiente.
+    Tenta hoje, amanhã e depois de amanhã até encontrar jogos.
+    """
+    if not FOOTBALL_DATA_KEY:
+        _api_diag["football_data"] = {"ok": False, "error": "KEY_NOT_SET"}
+        return []
+
+    base_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    for delta in range(3):
+        check_date = (base_dt + timedelta(days=delta)).strftime("%Y-%m-%d")
+        try:
+            r = requests.get(
+                f"{FOOTBALL_DATA_BASE}/matches",
+                headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
+                params={
+                    "dateFrom":     check_date,
+                    "dateTo":       check_date,
+                    "competitions": _FD_COMPETITIONS,
+                    "limit":        100,
+                },
+                timeout=12,
+            )
+            diag = {"http": r.status_code, "date_checked": check_date, "ok": False}
+            if r.status_code == 429:
+                diag["error"] = "RATE_LIMITED_10rpm"
+                _api_diag["football_data"] = diag
+                return []
+            if r.status_code != 200:
+                diag["error"] = r.text[:200]
+                _api_diag["football_data"] = diag
+                continue
+            body    = r.json()
+            raw     = body.get("matches", [])
+            diag["total_raw"]    = len(raw)
+            diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw})
+            fixtures = _parse_fd_matches(raw)
+            diag["total_parsed"] = len(fixtures)
+            diag["ok"]           = True
+            _api_diag["football_data"] = diag
+            if fixtures:
+                return fixtures[:25]
+        except Exception as e:
+            _api_diag["football_data"] = {"ok": False, "error": str(e), "date_checked": check_date}
+            return []
+
+    _api_diag["football_data"] = {
+        "ok": False,
+        "error": "NO_MATCHES_3_DAYS",
+        "dates_checked": [
+            (base_dt + timedelta(days=d)).strftime("%Y-%m-%d") for d in range(3)
+        ],
+    }
+    return []
 
 
 def _filter_past_fixtures(fixtures: list) -> list:
@@ -1431,7 +1456,10 @@ def fixtures_today():
             msg = "FOOTBALL_DATA_KEY nao detectada no ambiente do Render."
         elif fd_diag.get("http") and fd_diag["http"] != 200:
             msg = f"football-data.org retornou HTTP {fd_diag['http']}: {fd_diag.get('error','')}"
-        elif fd_diag.get("ok") and fd_diag.get("total", 0) == 0:
+        elif fd_diag.get("error") == "NO_MATCHES_3_DAYS":
+            dates = fd_diag.get("dates_checked", [])
+            msg = f"Nenhum jogo encontrado nos próximos 3 dias ({', '.join(dates)}) nas ligas do plano gratuito."
+        elif fd_diag.get("ok") and fd_diag.get("total_raw", fd_diag.get("total", 0)) == 0:
             msg = "Nenhum jogo encontrado hoje nas ligas cobertas pelo plano gratuito."
         else:
             msg = f"Todas as fontes falharam. Diagnostico: {fd_diag}"
