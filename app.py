@@ -3,6 +3,7 @@ from flask_cors import CORS
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 import os
 import json
 import time
@@ -147,10 +148,47 @@ _api_diag: dict = {}
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
 
-# Cache de fixtures: evita req repetida quando usuário clica várias vezes
-# TTL de 4 minutos — dados de fixture não mudam tão rápido
+# ── Cache em memória (perdido na hibernação do Render) ────────────────────────
 _fixtures_cache: dict = {"data": None, "ts": 0, "date": ""}
-_FIXTURES_TTL = 600  # segundos (10 min) — preserva cota de 100 req/dia
+_FIXTURES_TTL = 900  # 15 min — reduz chamadas dentro do mesmo ciclo ativo
+
+# ── Cache em arquivo (sobrevive hibernações, perdido apenas no redeploy) ───────
+_FILE_CACHE_DIR = Path("/tmp")
+
+def _file_cache_path(date_str: str) -> Path:
+    return _FILE_CACHE_DIR / f"apex_fixtures_{date_str}.json"
+
+def _read_file_cache(date_str: str) -> list | None:
+    """Lê fixtures do disco. Retorna None se expirado ou inválido."""
+    try:
+        p = _file_cache_path(date_str)
+        if not p.exists():
+            return None
+        data = json.loads(p.read_text())
+        if data.get("date") != date_str:
+            return None
+        fixtures = data.get("fixtures", [])
+        if not fixtures:
+            return None
+        # Se houver jogos ao vivo, expirar após 5 min para atualizar placar
+        has_live = any(f.get("status") in {"1H", "2H", "HT", "ET", "LIVE"} for f in fixtures)
+        age = time.time() - data.get("saved_at", 0)
+        if has_live and age > 300:
+            return None
+        return fixtures
+    except Exception:
+        return None
+
+def _write_file_cache(date_str: str, fixtures: list) -> None:
+    """Salva fixtures no disco para sobreviver hibernações."""
+    try:
+        _file_cache_path(date_str).write_text(json.dumps({
+            "date":     date_str,
+            "fixtures": fixtures,
+            "saved_at": time.time(),
+        }))
+    except Exception:
+        pass
 
 # Groq
 GROQ_KEY      = os.environ.get("GROQ_KEY", "")
@@ -895,7 +933,9 @@ def health():
     })
 
 def _parse_fixtures(response):
-    """Transforma resposta da API-Football em lista de fixtures filtrados."""
+    """Transforma resposta da API-Football em lista de fixtures filtrados.
+    O parâmetro timezone=America/Sao_Paulo garante que o date já vem em BRT.
+    """
     fixtures = []
     for f in response:
         status_short = f.get("fixture", {}).get("status", {}).get("short", "")
@@ -906,27 +946,30 @@ def _parse_fixtures(response):
             continue
         fixture_date = f.get("fixture", {}).get("date", "")
         try:
-            time_str = datetime.fromisoformat(
-                fixture_date.replace("Z", "+00:00")
-            ).strftime("%H:%M")
+            dt       = datetime.fromisoformat(fixture_date.replace("Z", "+00:00"))
+            time_str = dt.strftime("%H:%M")
+            date_str = dt.strftime("%Y-%m-%d")
         except Exception:
             time_str = ""
+            date_str = ""
         home_score = f.get("goals", {}).get("home")
         away_score = f.get("goals", {}).get("away")
         score = f"{home_score}-{away_score}" if home_score is not None else "-"
         fixtures.append({
-            "id":       str(f.get("fixture", {}).get("id", "")),
-            "home":     f.get("teams", {}).get("home", {}).get("name", ""),
-            "away":     f.get("teams", {}).get("away", {}).get("name", ""),
-            "league":   f.get("league", {}).get("name", ""),
-            "country":  f.get("league", {}).get("country", ""),
-            "time":     time_str,
-            "status":   status_short,
-            "score":    score,
-            "elapsed":  f.get("fixture", {}).get("status", {}).get("elapsed") or 0,
+            "id":        str(f.get("fixture", {}).get("id", "")),
+            "home":      f.get("teams", {}).get("home", {}).get("name", ""),
+            "away":      f.get("teams", {}).get("away", {}).get("name", ""),
+            "league":    f.get("league", {}).get("name", ""),
+            "country":   f.get("league", {}).get("country", ""),
+            "time":      time_str,
+            "date":      date_str,
+            "status":    status_short,
+            "score":     score,
+            "elapsed":   f.get("fixture", {}).get("status", {}).get("elapsed") or 0,
             "league_id": league_id,
+            "source":    "api-football",
         })
-    return fixtures[:20]
+    return fixtures[:25]
 
 
 def get_fixtures_from_thesportsdb(date_str: str) -> list:
@@ -1388,26 +1431,30 @@ def get_fixtures_from_football_data(date_str: str) -> list:
 
 def _filter_past_fixtures(fixtures: list) -> list:
     """
-    Remove fixtures com status 'NS' cujo horário de kickoff já passou.
-    TheSportsDB (e às vezes a API-Football) demora a atualizar o status,
-    então jogos que já começaram ou terminaram podem aparecer como NS.
-    Threshold: 30 minutos após o kickoff → assume que o jogo começou.
+    Remove fixtures NS cujo kickoff já passou há mais de 30 min.
+    Usa o campo 'date' do fixture (se disponível) para evitar confundir
+    jogos de amanhã com jogos de hoje que já passaram.
     """
-    now_brt = datetime.utcnow() - timedelta(hours=3)
+    now_brt   = datetime.utcnow() - timedelta(hours=3)
     today_brt = now_brt.strftime("%Y-%m-%d")
     result = []
     for f in fixtures:
-        if f.get("status") != "NS":
+        if f.get("status") not in ("NS", ""):
             result.append(f)
             continue
         time_str = f.get("time", "")
         if not time_str:
             result.append(f)
             continue
+        fixture_date = f.get("date") or today_brt
+        # Jogo de data futura: sempre manter
+        if fixture_date > today_brt:
+            result.append(f)
+            continue
         try:
-            kickoff = datetime.strptime(f"{today_brt} {time_str}", "%Y-%m-%d %H:%M")
+            kickoff = datetime.strptime(f"{fixture_date} {time_str}", "%Y-%m-%d %H:%M")
             if (now_brt - kickoff).total_seconds() > 30 * 60:
-                continue  # kickoff passou há mais de 30 min — API com status desatualizado
+                continue  # kickoff passou há mais de 30 min com status desatualizado
         except Exception:
             pass
         result.append(f)
@@ -1417,96 +1464,78 @@ def _filter_past_fixtures(fixtures: list) -> list:
 @app.route("/fixtures/today")
 def fixtures_today():
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")  # data BRT
         now   = time.time()
+        c     = _fixtures_cache
 
-        # Serve do cache se ainda válido
-        c = _fixtures_cache
+        def _serve(fixtures: list, source: str, cached: bool = False) -> object:
+            filtered = _filter_past_fixtures(fixtures)
+            c["data"] = fixtures; c["ts"] = now; c["date"] = today
+            resp = {"success": True, "count": len(filtered),
+                    "fixtures": filtered, "date": today, "source": source}
+            if cached:
+                resp["cached"] = True
+            return jsonify(resp)
+
+        # ── 1. Cache em memória (mais rápido) ─────────────────────────────────
         if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
-            filtered = _filter_past_fixtures(c["data"])
-            return jsonify({"success": True, "count": len(filtered),
-                            "fixtures": filtered, "date": today, "cached": True})
+            return _serve(c["data"], "memory-cache", cached=True)
 
-        # ── Fonte principal: football-data.org (sem limite diário, funciona em servidores)
+        # ── 2. Cache em arquivo (sobrevive hibernações do Render) ──────────────
+        file_fixtures = _read_file_cache(today)
+        if file_fixtures:
+            return _serve(file_fixtures, "file-cache", cached=True)
+
+        # ── 3. API-Football (primária — melhor cobertura, 100 req/dia) ─────────
+        try:
+            res = requests.get(
+                f"{API_BASE}/fixtures",
+                headers=API_HEADERS,
+                params={"date": today, "timezone": "America/Sao_Paulo"},
+                timeout=15,
+            )
+            af_ok = (res.status_code == 200 and not res.json().get("errors"))
+        except Exception:
+            af_ok = False
+
+        if af_ok:
+            raw      = res.json().get("response", [])
+            fixtures = _parse_fixtures(raw)
+            _api_diag["api_football"] = {"ok": True, "http": 200, "total": len(raw), "parsed": len(fixtures)}
+            _write_file_cache(today, fixtures)
+            return _serve(fixtures, "api-football")
+
+        # Registra motivo da falha da API-Football
+        try:
+            af_err = res.json().get("errors") or res.status_code
+        except Exception:
+            af_err = "timeout/unreachable"
+        _api_diag["api_football"] = {"ok": False, "error": str(af_err)}
+
+        # ── 4. football-data.org (backup — sem limite diário) ─────────────────
         if FOOTBALL_DATA_KEY:
             fd = get_fixtures_from_football_data(today)
             if fd:
-                c["data"] = fd; c["ts"] = now; c["date"] = today
-                return jsonify({"success": True, "count": len(fd),
-                                "fixtures": fd, "date": today, "source": "football-data"})
+                _write_file_cache(today, fd)
+                return _serve(fd, "football-data")
 
-        # ── Fonte secundária: API-Football (100 req/dia)
-        res = requests.get(
-            f"{API_BASE}/fixtures?date={today}&timezone=America/Sao_Paulo",
-            headers=API_HEADERS, timeout=15
-        )
-        is_rate_limited = res.status_code == 429
-        if res.status_code not in (200, 429):
-            is_rate_limited = True  # trata erro como esgotamento
-        if not is_rate_limited:
-            data = res.json()
-            if data.get("errors"):
-                is_rate_limited = True
-
-        if not is_rate_limited:
-            fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
-            c["data"] = fixtures; c["ts"] = now; c["date"] = today
-            return jsonify({"success": True, "count": len(fixtures),
-                            "fixtures": fixtures, "date": today})
-
-        # ── Fallbacks quando API-Football está esgotada ─────────────────────
-        # 1: football-data.org (mesmo sem key definida, tenta novamente caso haja race)
-        fd = get_fixtures_from_football_data(today)
-        if fd:
-            c["data"] = fd; c["ts"] = now; c["date"] = today
-            return jsonify({"success": True, "count": len(fd),
-                            "fixtures": fd, "date": today, "source": "football-data"})
-
-        # 2: SofaScore
-        ss = get_fixtures_from_sofascore(today)
-        if ss:
-            c["data"] = ss; c["ts"] = now; c["date"] = today
-            return jsonify({"success": True, "count": len(ss),
-                            "fixtures": ss, "date": today, "source": "sofascore"})
-
-        # 3: ESPN
-        espn = get_fixtures_from_espn(today)
-        if espn:
-            c["data"] = espn; c["ts"] = now; c["date"] = today
-            return jsonify({"success": True, "count": len(espn),
-                            "fixtures": espn, "date": today, "source": "espn"})
-
-        # 4: TheSportsDB
-        tsdb = get_fixtures_from_thesportsdb(today)
-        if tsdb:
-            c["data"] = tsdb; c["ts"] = now; c["date"] = today
-            return jsonify({"success": True, "count": len(tsdb),
-                            "fixtures": tsdb, "date": today, "source": "thesportsdb"})
-
-        # 5: cache antigo
+        # ── 5. Cache antigo (stale) ────────────────────────────────────────────
         if c["data"] is not None:
-            stale = _filter_past_fixtures(c["data"])
-            return jsonify({"success": True, "count": len(stale),
-                            "fixtures": stale, "date": c["date"], "cached": True,
-                            "warning": "Usando dados em cache."})
+            return _serve(c["data"], "stale-cache", cached=True)
 
+        # ── 6. Sem dados — retorna diagnóstico claro ───────────────────────────
+        af_diag = _api_diag.get("api_football", {})
         fd_diag = _api_diag.get("football_data", {})
-        if not FOOTBALL_DATA_KEY:
-            msg = "FOOTBALL_DATA_KEY nao detectada no ambiente do Render."
-        elif fd_diag.get("http") not in (None, 200) or fd_diag.get("http2") not in (None, 200):
-            bad_http = fd_diag.get("http") if fd_diag.get("http") not in (None, 200) else fd_diag.get("http2")
-            msg = (f"football-data.org retornou HTTP {bad_http}. "
-                   f"Verifique /fixtures/debug para detalhes. Erro: {fd_diag.get('error','')[:150]}")
-        elif fd_diag.get("error") == "NO_MATCHES_7_DAYS" or fd_diag.get("error") == "NO_MATCHES_3_DAYS":
-            raw_comp   = fd_diag.get("total_raw_comp", "?")
-            raw_nocomp = fd_diag.get("total_raw_nocomp", "?")
-            msg = (f"Sem jogos nos próximos 7 dias nas ligas do plano gratuito. "
-                   f"(raw_com_filtro={raw_comp}, raw_sem_filtro={raw_nocomp}) "
-                   f"Verifique /fixtures/debug.")
-        elif fd_diag.get("ok") and not fd_diag.get("total_parsed"):
-            msg = "API respondeu mas nenhum jogo válido encontrado. Verifique /fixtures/debug."
+        if af_diag.get("ok") is False:
+            err_detail = af_diag.get("error", "")
+            if "429" in str(err_detail) or "rateLimit" in str(err_detail).lower():
+                msg = ("Cota da API-Football atingida (100 req/dia). "
+                       "Configure FOOTBALL_DATA_KEY no Render como backup, "
+                       "ou aguarde meia-noite para resetar a cota.")
+            else:
+                msg = f"API-Football falhou: {err_detail}. Backup football-data.org: {fd_diag.get('error','sem key')}"
         else:
-            msg = f"Todas as fontes falharam. Verifique /fixtures/debug. Diag: {str(fd_diag)[:200]}"
+            msg = "Nenhuma fonte retornou jogos. Verifique /fixtures/debug."
         return jsonify({"success": False, "error": msg, "diag": _api_diag}), 503
 
     except Exception as ex:
