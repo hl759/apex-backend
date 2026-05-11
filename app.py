@@ -17,16 +17,34 @@ API_HEADERS = {"x-apisports-key": API_KEY}
 # TheSportsDB — API gratuita sem limite diário (alternativa à API-Football)
 THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
 
-# Palavras-chave para filtrar ligas disponíveis na Betano (substring case-insensitive)
+# Palavras-chave para filtrar ligas disponíveis na Betano (substring case-insensitive).
+# TheSportsDB usa nomes variados — inclui formas com e sem acento, prefixos de país, etc.
 BETANO_LEAGUES_TSDB = {
-    "brasileirão", "brasileirao", "série a", "serie a", "série b", "serie b",
-    "copa do brasil", "paulista", "carioca",
-    "premier league", "championship", "ligue 1", "bundesliga",
-    "la liga", "eredivisie", "primeira liga", "jupiler", "scottish premiership",
+    # Brasil — múltiplas grafias
+    "brasileirão", "brasileirao", "brasileir",
+    "serie a", "série a", "serie b", "série b",
+    "copa do brasil", "paulista", "carioca", "gaucho", "gaúcho",
+    # Europa Top 5
+    "premier league", "championship",
+    "ligue 1", "ligue 2",
+    "bundesliga",
+    "la liga",
+    "eredivisie",
+    "primeira liga",
+    "jupiler",
+    "scottish premier",
+    # Competições europeias
     "champions league", "europa league", "conference league",
-    "libertadores", "sudamericana", "liga profesional",
-    "liga mx", "mls", "saudi", "super lig", "süper lig",
-    "ekstraklasa", "russian premier",
+    # América do Sul
+    "libertadores", "sudamericana",
+    "liga profesional", "apertura", "clausura",
+    # Internacional
+    "liga mx", "mls",
+    "saudi pro", "saudi premier",
+    "super lig", "süper lig",
+    "ekstraklasa",
+    "russian premier",
+    "argentine", "argentina",
 }
 
 TSDB_STATUS_MAP = {
@@ -825,6 +843,9 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
     """
     Busca fixtures na TheSportsDB (gratuita, sem limite diário, sem chave).
     Retorna lista no mesmo formato de _parse_fixtures().
+
+    TheSportsDB atualiza status muito devagar — inferimos o status real
+    comparando o horário de kickoff (UTC→BRT) com a hora atual.
     """
     try:
         url = f"{THESPORTSDB_BASE}/eventsday.php?d={date_str}&s=Soccer"
@@ -835,12 +856,13 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
     except Exception:
         return []
 
-    fixtures = []
-    for ev in events:
-        league_name = (ev.get("strLeague") or "").lower()
-        if not any(kw in league_name for kw in BETANO_LEAGUES_TSDB):
-            continue
+    now_brt   = datetime.utcnow() - timedelta(hours=3)
+    today_brt = now_brt.strftime("%Y-%m-%d")
 
+    betano = []
+    others = []
+
+    for ev in events:
         raw_status = ev.get("strStatus") or ""
         status = TSDB_STATUS_MAP.get(raw_status, "NS")
         if status in _TSDB_SKIP:
@@ -854,17 +876,36 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
         except Exception:
             time_str = raw_time[:5] if raw_time else ""
 
+        # Inferir status real pelo horário — TheSportsDB fica travado em "NS"
+        elapsed = 0
+        if status == "NS" and time_str:
+            try:
+                kickoff = datetime.strptime(f"{today_brt} {time_str}", "%Y-%m-%d %H:%M")
+                mins    = (now_brt - kickoff).total_seconds() / 60
+                if mins > 110:
+                    continue          # Encerrado — descarta
+                elif mins > 52:
+                    status, elapsed = "2H", min(90, int(mins) - 15)
+                elif mins > 47:
+                    status, elapsed = "HT", 45
+                elif mins > 2:
+                    status, elapsed = "1H", min(45, int(mins))
+                # else: ainda não começou → mantém NS
+            except Exception:
+                pass
+
         home_score = ev.get("intHomeScore")
         away_score = ev.get("intAwayScore")
         score = (f"{home_score}-{away_score}"
                  if home_score is not None and away_score is not None else "-")
 
-        try:
-            elapsed = int(ev.get("strProgress") or 0)
-        except (ValueError, TypeError):
-            elapsed = 45 if status == "HT" else 0
+        if not elapsed:
+            try:
+                elapsed = int(ev.get("strProgress") or 0)
+            except (ValueError, TypeError):
+                elapsed = 45 if status == "HT" else 0
 
-        fixtures.append({
+        fixture = {
             "id":        f"tsdb_{ev.get('idEvent', '')}",
             "home":      ev.get("strHomeTeam", ""),
             "away":      ev.get("strAwayTeam", ""),
@@ -876,9 +917,18 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
             "elapsed":   elapsed,
             "league_id": 0,
             "source":    "thesportsdb",
-        })
+        }
 
-    return fixtures[:20]
+        league_lower = (ev.get("strLeague") or "").lower()
+        if any(kw in league_lower for kw in BETANO_LEAGUES_TSDB):
+            betano.append(fixture)
+        else:
+            others.append(fixture)
+
+    # Prefere ligas Betano; se o filtro não retornar nada, usa todos os jogos
+    # disponíveis (melhor que retornar erro)
+    result = betano if betano else others
+    return result[:20]
 
 
 def _filter_past_fixtures(fixtures: list) -> list:
@@ -940,7 +990,8 @@ def fixtures_today():
 
         if is_rate_limited:
             # Tenta TheSportsDB como alternativa gratuita sem limite diário
-            tsdb = _filter_past_fixtures(get_fixtures_from_thesportsdb(today))
+            # (status inference já feita dentro de get_fixtures_from_thesportsdb)
+            tsdb = get_fixtures_from_thesportsdb(today)
             if tsdb:
                 c["data"] = tsdb
                 c["ts"]   = now
