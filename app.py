@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import json
 import time
@@ -64,6 +65,42 @@ TSDB_STATUS_MAP = {
     "Abandoned":   "ABD",
 }
 _TSDB_SKIP = {"FT", "PEN", "CANC", "PST", "ABD"}
+
+# ── ESPN API — pública, sem chave, sem limite diário ───────────────────────
+# Slugs das ligas cobertas pela Betano que a ESPN indexa
+ESPN_LEAGUE_SLUGS = [
+    ("eng.1",                 "English Premier League",  "England"),
+    ("eng.2",                 "Championship",            "England"),
+    ("esp.1",                 "La Liga",                 "Spain"),
+    ("ger.1",                 "Bundesliga",              "Germany"),
+    ("ita.1",                 "Serie A",                 "Italy"),
+    ("fra.1",                 "Ligue 1",                 "France"),
+    ("ned.1",                 "Eredivisie",              "Netherlands"),
+    ("por.1",                 "Primeira Liga",           "Portugal"),
+    ("bra.1",                 "Brasileirao Serie A",     "Brazil"),
+    ("bra.2",                 "Brasileirao Serie B",     "Brazil"),
+    ("usa.1",                 "MLS",                     "USA"),
+    ("mex.1",                 "Liga MX",                 "Mexico"),
+    ("uefa.champions",        "Champions League",        "Europe"),
+    ("uefa.europa",           "Europa League",           "Europe"),
+    ("conmebol.libertadores", "Copa Libertadores",       "South America"),
+]
+
+ESPN_STATUS_MAP = {
+    "STATUS_SCHEDULED":   "NS",
+    "STATUS_IN_PROGRESS": "LIVE",
+    "STATUS_HALFTIME":    "HT",
+    "STATUS_FINAL":       "FT",
+    "STATUS_FULL_TIME":   "FT",
+    "STATUS_POSTPONED":   "PST",
+    "STATUS_CANCELED":    "CANC",
+    "STATUS_SUSPENDED":   "PST",
+    "STATUS_DELAYED":     "NS",
+    "STATUS_EXTRA_TIME":  "ET",
+    "STATUS_PENALTY":     "PEN",
+    "STATUS_END_PERIOD":  "HT",
+}
+_ESPN_SKIP = {"FT", "PST", "CANC", "PEN"}
 
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
@@ -931,6 +968,120 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
     return result[:20]
 
 
+def _parse_espn_event(ev: dict, league_name: str, country: str) -> dict | None:
+    """Converte um evento ESPN no formato interno de fixture."""
+    try:
+        comp        = ev.get("competitions", [{}])[0]
+        status_obj  = comp.get("status", {})
+        status_name = status_obj.get("type", {}).get("name", "STATUS_SCHEDULED")
+        status      = ESPN_STATUS_MAP.get(status_name, "NS")
+        if status in _ESPN_SKIP:
+            return None
+
+        # Refina LIVE → 1H ou 2H pelo período
+        elapsed = 0
+        if status == "LIVE":
+            period  = status_obj.get("period", 1)
+            status  = "2H" if period >= 2 else "1H"
+            clock   = status_obj.get("displayClock", "0:00")
+            try:
+                elapsed = int(clock.split(":")[0])
+            except Exception:
+                pass
+        elif status == "HT":
+            elapsed = 45
+
+        # Times e placar
+        home_team = away_team = ""
+        home_score = away_score = None
+        for ct in comp.get("competitors", []):
+            name  = ct.get("team", {}).get("displayName", "")
+            score = ct.get("score")
+            if ct.get("homeAway") == "home":
+                home_team, home_score = name, score
+            else:
+                away_team, away_score = name, score
+
+        if not home_team or not away_team:
+            return None
+
+        score = (f"{home_score}-{away_score}"
+                 if home_score is not None and away_score is not None else "-")
+
+        # Horário UTC → BRT
+        raw_date = ev.get("date", "")
+        try:
+            utc_dt   = datetime.strptime(raw_date[:16], "%Y-%m-%dT%H:%M")
+            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+        except Exception:
+            time_str = ""
+
+        # Nome da liga real (ESPN retorna no objeto leagues da resposta)
+        real_league = ev.get("_league", league_name)
+
+        return {
+            "id":        f"espn_{ev.get('id', '')}",
+            "home":      home_team,
+            "away":      away_team,
+            "league":    real_league,
+            "country":   country,
+            "time":      time_str,
+            "status":    status,
+            "score":     score,
+            "elapsed":   elapsed,
+            "league_id": 0,
+            "source":    "espn",
+        }
+    except Exception:
+        return None
+
+
+def get_fixtures_from_espn(date_str: str) -> list:
+    """
+    Busca fixtures de hoje nas ligas Betano via ESPN API pública (sem chave, sem limite).
+    Faz chamadas paralelas para as ligas em paralelo — tempo total ~3-5 s.
+    """
+    espn_date = date_str.replace("-", "")  # YYYYMMDD
+
+    def fetch_league(slug: str, league_name: str, country: str) -> list:
+        try:
+            url = (f"https://site.api.espn.com/apis/site/v2"
+                   f"/sports/soccer/{slug}/scoreboard")
+            r = requests.get(url, params={"dates": espn_date}, timeout=7)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            # Nome real da liga vem de data["leagues"][0]["name"]
+            real_league = league_name
+            if data.get("leagues"):
+                real_league = data["leagues"][0].get("name", league_name)
+            fixtures = []
+            for ev in data.get("events", []):
+                ev["_league"] = real_league
+                parsed = _parse_espn_event(ev, real_league, country)
+                if parsed:
+                    fixtures.append(parsed)
+            return fixtures
+        except Exception:
+            return []
+
+    all_fixtures: list = []
+    with ThreadPoolExecutor(max_workers=len(ESPN_LEAGUE_SLUGS)) as pool:
+        futures = {
+            pool.submit(fetch_league, slug, name, country): slug
+            for slug, name, country in ESPN_LEAGUE_SLUGS
+        }
+        for fut in as_completed(futures, timeout=12):
+            try:
+                all_fixtures.extend(fut.result())
+            except Exception:
+                pass
+
+    # Ordena por horário, prioriza jogos ainda não encerrados
+    all_fixtures.sort(key=lambda f: f.get("time", ""))
+    return all_fixtures[:25]
+
+
 def _filter_past_fixtures(fixtures: list) -> list:
     """
     Remove fixtures com status 'NS' cujo horário de kickoff já passou.
@@ -989,8 +1140,18 @@ def fixtures_today():
                 is_rate_limited = True
 
         if is_rate_limited:
-            # Tenta TheSportsDB como alternativa gratuita sem limite diário
-            # (status inference já feita dentro de get_fixtures_from_thesportsdb)
+            # 1ª tentativa: ESPN API (pública, sem chave, sem limite diário)
+            espn = get_fixtures_from_espn(today)
+            if espn:
+                c["data"] = espn
+                c["ts"]   = now
+                c["date"] = today
+                return jsonify({
+                    "success": True, "count": len(espn), "fixtures": espn, "date": today,
+                    "source": "espn",
+                })
+
+            # 2ª tentativa: TheSportsDB
             tsdb = get_fixtures_from_thesportsdb(today)
             if tsdb:
                 c["data"] = tsdb
@@ -999,17 +1160,17 @@ def fixtures_today():
                 return jsonify({
                     "success": True, "count": len(tsdb), "fixtures": tsdb, "date": today,
                     "source": "thesportsdb",
-                    "warning": "Cota API-Football esgotada. Usando TheSportsDB como fonte alternativa.",
                 })
-            # Último recurso: cache antigo (qualquer data é melhor que erro)
+
+            # Último recurso: cache antigo
             if c["data"] is not None:
                 stale = _filter_past_fixtures(c["data"])
                 return jsonify({"success": True, "count": len(stale),
                                 "fixtures": stale, "date": c["date"],
                                 "cached": True,
-                                "warning": "Cota API-Football esgotada. Usando dados em cache."})
+                                "warning": "Usando dados em cache. Fontes alternativas indisponíveis."})
             return jsonify({"success": False,
-                            "error": "Cota diária da API-Football atingida. Tente novamente após meia-noite."}), 429
+                            "error": "Sem dados de fixtures disponíveis no momento. Tente novamente em instantes."}), 503
 
         fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
 
