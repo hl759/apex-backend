@@ -138,6 +138,9 @@ _FD_STATUS = {
 }
 _FD_SKIP = {"FT", "PST", "CANC"}
 
+# Diagnóstico em tempo real — atualizado a cada chamada às APIs de fixtures
+_api_diag: dict = {}
+
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
@@ -871,11 +874,23 @@ def sanitize_matches(matches):
 
 @app.route("/")
 def index():
-    return jsonify({"status": "APEX TRADE Backend online", "version": "4.0", "ai": "Groq/LLaMA-3.3-70b"})
+    return jsonify({
+        "status": "APEX TRADE Backend online",
+        "version": "4.1",
+        "ai": "Groq/LLaMA-3.3-70b",
+        "football_data_key_set": bool(FOOTBALL_DATA_KEY),
+        "football_data_key_preview": (FOOTBALL_DATA_KEY[:4] + "****") if FOOTBALL_DATA_KEY else None,
+        "api_diag": _api_diag,
+    })
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True, "time": datetime.now().isoformat()})
+    return jsonify({
+        "ok": True,
+        "time": datetime.now().isoformat(),
+        "football_data_key_set": bool(FOOTBALL_DATA_KEY),
+        "api_diag": _api_diag,
+    })
 
 def _parse_fixtures(response):
     """Transforma resposta da API-Football em lista de fixtures filtrados."""
@@ -1225,12 +1240,10 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
 def get_fixtures_from_football_data(date_str: str) -> list:
     """
     football-data.org — gratuita, sem limite diário, projetada para acesso
-    de servidor (não bloqueia IPs de cloud como Render).
-    Requer FOOTBALL_DATA_KEY no ambiente; retorna [] se não configurada.
-    Cobre: Premier League, Bundesliga, La Liga, Serie A, Ligue 1, Eredivisie,
-           Primeira Liga, Champions League, Europa League, Brasileirão Serie A.
+    de servidor. Requer FOOTBALL_DATA_KEY no ambiente.
     """
     if not FOOTBALL_DATA_KEY:
+        _api_diag["football_data"] = {"ok": False, "error": "KEY_NOT_SET"}
         return []
     try:
         r = requests.get(
@@ -1239,12 +1252,23 @@ def get_fixtures_from_football_data(date_str: str) -> list:
             params={"dateFrom": date_str, "dateTo": date_str},
             timeout=12,
         )
+        diag = {"http": r.status_code, "ok": False}
         if r.status_code == 429:
-            return []   # rate limit (10 req/min no plano gratuito)
-        if r.status_code != 200:
+            diag["error"] = "RATE_LIMITED_10rpm"
+            _api_diag["football_data"] = diag
             return []
-        matches = r.json().get("matches", [])
-    except Exception:
+        if r.status_code != 200:
+            diag["error"] = r.text[:300]
+            _api_diag["football_data"] = diag
+            return []
+        body    = r.json()
+        matches = body.get("matches", [])
+        diag["ok"]          = True
+        diag["total"]       = len(matches)
+        diag["competitions"] = list({m.get("competition", {}).get("name","") for m in matches})
+        _api_diag["football_data"] = diag
+    except Exception as e:
+        _api_diag["football_data"] = {"ok": False, "error": str(e)}
         return []
 
     fixtures = []
@@ -1402,8 +1426,16 @@ def fixtures_today():
                             "fixtures": stale, "date": c["date"], "cached": True,
                             "warning": "Usando dados em cache."})
 
-        return jsonify({"success": False,
-                        "error": "Configure FOOTBALL_DATA_KEY no Render (football-data.org gratuito). Visite /fixtures/debug."}), 503
+        fd_diag = _api_diag.get("football_data", {})
+        if not FOOTBALL_DATA_KEY:
+            msg = "FOOTBALL_DATA_KEY nao detectada no ambiente do Render."
+        elif fd_diag.get("http") and fd_diag["http"] != 200:
+            msg = f"football-data.org retornou HTTP {fd_diag['http']}: {fd_diag.get('error','')}"
+        elif fd_diag.get("ok") and fd_diag.get("total", 0) == 0:
+            msg = "Nenhum jogo encontrado hoje nas ligas cobertas pelo plano gratuito."
+        else:
+            msg = f"Todas as fontes falharam. Diagnostico: {fd_diag}"
+        return jsonify({"success": False, "error": msg, "diag": _api_diag}), 503
 
     except Exception as ex:
         return jsonify({"success": False, "error": str(ex)}), 500
