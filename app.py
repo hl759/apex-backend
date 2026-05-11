@@ -881,6 +881,34 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
     return fixtures[:20]
 
 
+def _filter_past_fixtures(fixtures: list) -> list:
+    """
+    Remove fixtures com status 'NS' cujo horário de kickoff já passou.
+    TheSportsDB (e às vezes a API-Football) demora a atualizar o status,
+    então jogos que já começaram ou terminaram podem aparecer como NS.
+    Threshold: 30 minutos após o kickoff → assume que o jogo começou.
+    """
+    now_brt = datetime.utcnow() - timedelta(hours=3)
+    today_brt = now_brt.strftime("%Y-%m-%d")
+    result = []
+    for f in fixtures:
+        if f.get("status") != "NS":
+            result.append(f)
+            continue
+        time_str = f.get("time", "")
+        if not time_str:
+            result.append(f)
+            continue
+        try:
+            kickoff = datetime.strptime(f"{today_brt} {time_str}", "%Y-%m-%d %H:%M")
+            if (now_brt - kickoff).total_seconds() > 30 * 60:
+                continue  # kickoff passou há mais de 30 min — API com status desatualizado
+        except Exception:
+            pass
+        result.append(f)
+    return result
+
+
 @app.route("/fixtures/today")
 def fixtures_today():
     try:
@@ -890,8 +918,9 @@ def fixtures_today():
         # Serve do cache se ainda válido (evita queimar cota de 100 req/dia)
         c = _fixtures_cache
         if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
-            return jsonify({"success": True, "count": len(c["data"]),
-                            "fixtures": c["data"], "date": today, "cached": True})
+            filtered = _filter_past_fixtures(c["data"])
+            return jsonify({"success": True, "count": len(filtered),
+                            "fixtures": filtered, "date": today, "cached": True})
 
         res = requests.get(
             f"{API_BASE}/fixtures?date={today}&timezone=America/Sao_Paulo",
@@ -911,7 +940,7 @@ def fixtures_today():
 
         if is_rate_limited:
             # Tenta TheSportsDB como alternativa gratuita sem limite diário
-            tsdb = get_fixtures_from_thesportsdb(today)
+            tsdb = _filter_past_fixtures(get_fixtures_from_thesportsdb(today))
             if tsdb:
                 c["data"] = tsdb
                 c["ts"]   = now
@@ -923,14 +952,15 @@ def fixtures_today():
                 })
             # Último recurso: cache antigo (qualquer data é melhor que erro)
             if c["data"] is not None:
-                return jsonify({"success": True, "count": len(c["data"]),
-                                "fixtures": c["data"], "date": c["date"],
+                stale = _filter_past_fixtures(c["data"])
+                return jsonify({"success": True, "count": len(stale),
+                                "fixtures": stale, "date": c["date"],
                                 "cached": True,
                                 "warning": "Cota API-Football esgotada. Usando dados em cache."})
             return jsonify({"success": False,
                             "error": "Cota diária da API-Football atingida. Tente novamente após meia-noite."}), 429
 
-        fixtures = _parse_fixtures(data.get("response", []))
+        fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
 
         # Atualiza cache
         c["data"] = fixtures
