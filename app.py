@@ -123,6 +123,21 @@ _SS_STATUS = {
 }
 _SS_SKIP = {"FT", "CANC", "PST", "PEN"}
 
+# ── football-data.org — gratuita, sem limite diário, aceita IPs de servidor ─
+# Registro grátis em https://www.football-data.org/client/register
+# Depois adicione FOOTBALL_DATA_KEY nas variáveis de ambiente do Render
+FOOTBALL_DATA_KEY  = os.environ.get("FOOTBALL_DATA_KEY", "")
+FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
+
+_FD_STATUS = {
+    "SCHEDULED": "NS", "TIMED": "NS",
+    "IN_PLAY":   "1H",   # API não informa minuto na listagem
+    "PAUSED":    "HT",
+    "FINISHED":  "FT",  "POSTPONED": "PST",
+    "CANCELLED": "CANC", "SUSPENDED": "PST",
+}
+_FD_SKIP = {"FT", "PST", "CANC"}
+
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
 _standings_cache_date: str = ""
@@ -1207,6 +1222,82 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
     return result[:25]
 
 
+def get_fixtures_from_football_data(date_str: str) -> list:
+    """
+    football-data.org — gratuita, sem limite diário, projetada para acesso
+    de servidor (não bloqueia IPs de cloud como Render).
+    Requer FOOTBALL_DATA_KEY no ambiente; retorna [] se não configurada.
+    Cobre: Premier League, Bundesliga, La Liga, Serie A, Ligue 1, Eredivisie,
+           Primeira Liga, Champions League, Europa League, Brasileirão Serie A.
+    """
+    if not FOOTBALL_DATA_KEY:
+        return []
+    try:
+        r = requests.get(
+            f"{FOOTBALL_DATA_BASE}/matches",
+            headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
+            params={"dateFrom": date_str, "dateTo": date_str},
+            timeout=12,
+        )
+        if r.status_code == 429:
+            return []   # rate limit (10 req/min no plano gratuito)
+        if r.status_code != 200:
+            return []
+        matches = r.json().get("matches", [])
+    except Exception:
+        return []
+
+    fixtures = []
+    for m in matches:
+        status_str = m.get("status", "SCHEDULED")
+        status     = _FD_STATUS.get(status_str, "NS")
+        if status in _FD_SKIP:
+            continue
+
+        elapsed = 45 if status == "HT" else 0
+
+        # Horário UTC → BRT
+        utc_str = m.get("utcDate", "")
+        try:
+            utc_dt   = datetime.strptime(utc_str[:16], "%Y-%m-%dT%H:%M")
+            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+        except Exception:
+            time_str = ""
+
+        home = (m.get("homeTeam") or {}).get("name", "") or \
+               (m.get("homeTeam") or {}).get("shortName", "")
+        away = (m.get("awayTeam") or {}).get("name", "") or \
+               (m.get("awayTeam") or {}).get("shortName", "")
+        if not home or not away:
+            continue
+
+        ft   = (m.get("score") or {}).get("fullTime") or {}
+        hs   = ft.get("home")
+        as_  = ft.get("away")
+        score = f"{hs}-{as_}" if hs is not None and as_ is not None else "-"
+
+        comp        = m.get("competition") or {}
+        league_name = comp.get("name", "")
+        country     = (comp.get("area") or {}).get("name", "")
+
+        fixtures.append({
+            "id":        str(m.get("id", "")),
+            "home":      home,
+            "away":      away,
+            "league":    league_name,
+            "country":   country,
+            "time":      time_str,
+            "status":    status,
+            "score":     score,
+            "elapsed":   elapsed,
+            "league_id": 0,
+            "source":    "football-data",
+        })
+
+    fixtures.sort(key=lambda f: f.get("time", ""))
+    return fixtures[:25]
+
+
 def _filter_past_fixtures(fixtures: list) -> list:
     """
     Remove fixtures com status 'NS' cujo horário de kickoff já passou.
@@ -1241,68 +1332,78 @@ def fixtures_today():
         today = datetime.now().strftime("%Y-%m-%d")
         now   = time.time()
 
-        # Serve do cache se ainda válido (evita queimar cota de 100 req/dia)
+        # Serve do cache se ainda válido
         c = _fixtures_cache
         if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
             filtered = _filter_past_fixtures(c["data"])
             return jsonify({"success": True, "count": len(filtered),
                             "fixtures": filtered, "date": today, "cached": True})
 
+        # ── Fonte principal: football-data.org (sem limite diário, funciona em servidores)
+        if FOOTBALL_DATA_KEY:
+            fd = get_fixtures_from_football_data(today)
+            if fd:
+                c["data"] = fd; c["ts"] = now; c["date"] = today
+                return jsonify({"success": True, "count": len(fd),
+                                "fixtures": fd, "date": today, "source": "football-data"})
+
+        # ── Fonte secundária: API-Football (100 req/dia)
         res = requests.get(
             f"{API_BASE}/fixtures?date={today}&timezone=America/Sao_Paulo",
             headers=API_HEADERS, timeout=15
         )
-        # API-Football pode retornar 429 OU HTTP 200 com campo errors no corpo
         is_rate_limited = res.status_code == 429
         if res.status_code not in (200, 429):
-            return jsonify({"success": False, "error": f"API status {res.status_code}"}), 500
-
-        data = {}
+            is_rate_limited = True  # trata erro como esgotamento
         if not is_rate_limited:
             data = res.json()
-            errors = data.get("errors", {})
-            if errors:  # ex: {'requests': 'You have reached the request limit...'}
+            if data.get("errors"):
                 is_rate_limited = True
 
-        if is_rate_limited:
-            # 1ª: SofaScore (única chamada, cobre todas as ligas)
-            ss = get_fixtures_from_sofascore(today)
-            if ss:
-                c["data"] = ss; c["ts"] = now; c["date"] = today
-                return jsonify({"success": True, "count": len(ss),
-                                "fixtures": ss, "date": today, "source": "sofascore"})
+        if not is_rate_limited:
+            fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
+            c["data"] = fixtures; c["ts"] = now; c["date"] = today
+            return jsonify({"success": True, "count": len(fixtures),
+                            "fixtures": fixtures, "date": today})
 
-            # 2ª: ESPN (chamadas paralelas por liga)
-            espn = get_fixtures_from_espn(today)
-            if espn:
-                c["data"] = espn; c["ts"] = now; c["date"] = today
-                return jsonify({"success": True, "count": len(espn),
-                                "fixtures": espn, "date": today, "source": "espn"})
+        # ── Fallbacks quando API-Football está esgotada ─────────────────────
+        # 1: football-data.org (mesmo sem key definida, tenta novamente caso haja race)
+        fd = get_fixtures_from_football_data(today)
+        if fd:
+            c["data"] = fd; c["ts"] = now; c["date"] = today
+            return jsonify({"success": True, "count": len(fd),
+                            "fixtures": fd, "date": today, "source": "football-data"})
 
-            # 3ª: TheSportsDB
-            tsdb = get_fixtures_from_thesportsdb(today)
-            if tsdb:
-                c["data"] = tsdb; c["ts"] = now; c["date"] = today
-                return jsonify({"success": True, "count": len(tsdb),
-                                "fixtures": tsdb, "date": today, "source": "thesportsdb"})
+        # 2: SofaScore
+        ss = get_fixtures_from_sofascore(today)
+        if ss:
+            c["data"] = ss; c["ts"] = now; c["date"] = today
+            return jsonify({"success": True, "count": len(ss),
+                            "fixtures": ss, "date": today, "source": "sofascore"})
 
-            # Cache antigo
-            if c["data"] is not None:
-                stale = _filter_past_fixtures(c["data"])
-                return jsonify({"success": True, "count": len(stale),
-                                "fixtures": stale, "date": c["date"], "cached": True,
-                                "warning": "Usando dados em cache."})
-            return jsonify({"success": False,
-                            "error": "Sem dados disponíveis. Visite /fixtures/debug para diagnóstico."}), 503
+        # 3: ESPN
+        espn = get_fixtures_from_espn(today)
+        if espn:
+            c["data"] = espn; c["ts"] = now; c["date"] = today
+            return jsonify({"success": True, "count": len(espn),
+                            "fixtures": espn, "date": today, "source": "espn"})
 
-        fixtures = _filter_past_fixtures(_parse_fixtures(data.get("response", [])))
+        # 4: TheSportsDB
+        tsdb = get_fixtures_from_thesportsdb(today)
+        if tsdb:
+            c["data"] = tsdb; c["ts"] = now; c["date"] = today
+            return jsonify({"success": True, "count": len(tsdb),
+                            "fixtures": tsdb, "date": today, "source": "thesportsdb"})
 
-        # Atualiza cache
-        c["data"] = fixtures
-        c["ts"]   = now
-        c["date"] = today
+        # 5: cache antigo
+        if c["data"] is not None:
+            stale = _filter_past_fixtures(c["data"])
+            return jsonify({"success": True, "count": len(stale),
+                            "fixtures": stale, "date": c["date"], "cached": True,
+                            "warning": "Usando dados em cache."})
 
-        return jsonify({"success": True, "count": len(fixtures), "fixtures": fixtures, "date": today})
+        return jsonify({"success": False,
+                        "error": "Configure FOOTBALL_DATA_KEY no Render (football-data.org gratuito). Visite /fixtures/debug."}), 503
 
     except Exception as ex:
         return jsonify({"success": False, "error": str(ex)}), 500
@@ -1448,6 +1549,26 @@ def fixtures_debug():
     """Testa conectividade com cada fonte de fixtures e retorna diagnóstico."""
     today = datetime.now().strftime("%Y-%m-%d")
     results = {}
+
+    # Testa football-data.org
+    if FOOTBALL_DATA_KEY:
+        try:
+            r = requests.get(
+                f"{FOOTBALL_DATA_BASE}/matches",
+                headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
+                params={"dateFrom": today, "dateTo": today},
+                timeout=10,
+            )
+            body = r.json() if r.status_code == 200 else {}
+            results["football_data_org"] = {
+                "http": r.status_code,
+                "matches": len(body.get("matches") or []),
+                "ok": r.status_code == 200,
+            }
+        except Exception as e:
+            results["football_data_org"] = {"http": None, "matches": 0, "ok": False, "error": str(e)}
+    else:
+        results["football_data_org"] = {"ok": False, "error": "FOOTBALL_DATA_KEY não configurada"}
 
     # Testa SofaScore
     try:
