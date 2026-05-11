@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 import time
@@ -13,6 +13,39 @@ CORS(app)
 API_KEY  = os.environ.get("API_KEY", "98e06cbc3c531496be35529357044cfc")
 API_BASE = "https://v3.football.api-sports.io"
 API_HEADERS = {"x-apisports-key": API_KEY}
+
+# TheSportsDB — API gratuita sem limite diário (alternativa à API-Football)
+THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
+
+# Palavras-chave para filtrar ligas disponíveis na Betano (substring case-insensitive)
+BETANO_LEAGUES_TSDB = {
+    "brasileirão", "brasileirao", "série a", "serie a", "série b", "serie b",
+    "copa do brasil", "paulista", "carioca",
+    "premier league", "championship", "ligue 1", "bundesliga",
+    "la liga", "eredivisie", "primeira liga", "jupiler", "scottish premiership",
+    "champions league", "europa league", "conference league",
+    "libertadores", "sudamericana", "liga profesional",
+    "liga mx", "mls", "saudi", "super lig", "süper lig",
+    "ekstraklasa", "russian premier",
+}
+
+TSDB_STATUS_MAP = {
+    "":            "NS",
+    "Not Started": "NS",
+    "1st Half":    "1H",
+    "In Progress": "1H",
+    "Half Time":   "HT",
+    "2nd Half":    "2H",
+    "Finished":    "FT",
+    "AOT":         "FT",
+    "FT":          "FT",
+    "Extra Time":  "ET",
+    "Penalties":   "PEN",
+    "Postponed":   "PST",
+    "Cancelled":   "CANC",
+    "Abandoned":   "ABD",
+}
+_TSDB_SKIP = {"FT", "PEN", "CANC", "PST", "ABD"}
 
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
@@ -788,6 +821,66 @@ def _parse_fixtures(response):
     return fixtures[:20]
 
 
+def get_fixtures_from_thesportsdb(date_str: str) -> list:
+    """
+    Busca fixtures na TheSportsDB (gratuita, sem limite diário, sem chave).
+    Retorna lista no mesmo formato de _parse_fixtures().
+    """
+    try:
+        url = f"{THESPORTSDB_BASE}/eventsday.php?d={date_str}&s=Soccer"
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return []
+        events = r.json().get("events") or []
+    except Exception:
+        return []
+
+    fixtures = []
+    for ev in events:
+        league_name = (ev.get("strLeague") or "").lower()
+        if not any(kw in league_name for kw in BETANO_LEAGUES_TSDB):
+            continue
+
+        raw_status = ev.get("strStatus") or ""
+        status = TSDB_STATUS_MAP.get(raw_status, "NS")
+        if status in _TSDB_SKIP:
+            continue
+
+        # Converte horário UTC → BRT (UTC-3)
+        raw_time = ev.get("strTime") or ""
+        try:
+            utc_dt   = datetime.strptime(f"{date_str} {raw_time[:5]}", "%Y-%m-%d %H:%M")
+            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+        except Exception:
+            time_str = raw_time[:5] if raw_time else ""
+
+        home_score = ev.get("intHomeScore")
+        away_score = ev.get("intAwayScore")
+        score = (f"{home_score}-{away_score}"
+                 if home_score is not None and away_score is not None else "-")
+
+        try:
+            elapsed = int(ev.get("strProgress") or 0)
+        except (ValueError, TypeError):
+            elapsed = 45 if status == "HT" else 0
+
+        fixtures.append({
+            "id":        f"tsdb_{ev.get('idEvent', '')}",
+            "home":      ev.get("strHomeTeam", ""),
+            "away":      ev.get("strAwayTeam", ""),
+            "league":    ev.get("strLeague", ""),
+            "country":   ev.get("strCountry", ""),
+            "time":      time_str,
+            "status":    status,
+            "score":     score,
+            "elapsed":   elapsed,
+            "league_id": 0,
+            "source":    "thesportsdb",
+        })
+
+    return fixtures[:20]
+
+
 @app.route("/fixtures/today")
 def fixtures_today():
     try:
@@ -817,7 +910,18 @@ def fixtures_today():
                 is_rate_limited = True
 
         if is_rate_limited:
-            # Serve cache antigo se houver — qualquer data é melhor que erro
+            # Tenta TheSportsDB como alternativa gratuita sem limite diário
+            tsdb = get_fixtures_from_thesportsdb(today)
+            if tsdb:
+                c["data"] = tsdb
+                c["ts"]   = now
+                c["date"] = today
+                return jsonify({
+                    "success": True, "count": len(tsdb), "fixtures": tsdb, "date": today,
+                    "source": "thesportsdb",
+                    "warning": "Cota API-Football esgotada. Usando TheSportsDB como fonte alternativa.",
+                })
+            # Último recurso: cache antigo (qualquer data é melhor que erro)
             if c["data"] is not None:
                 return jsonify({"success": True, "count": len(c["data"]),
                                 "fixtures": c["data"], "date": c["date"],
