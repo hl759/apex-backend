@@ -1036,10 +1036,24 @@ def _parse_espn_event(ev: dict, league_name: str, country: str) -> dict | None:
         return None
 
 
+_ESPN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.espn.com",
+    "Referer": "https://www.espn.com/",
+}
+
+
 def get_fixtures_from_espn(date_str: str) -> list:
     """
     Busca fixtures de hoje nas ligas Betano via ESPN API pública (sem chave, sem limite).
-    Faz chamadas paralelas para as ligas em paralelo — tempo total ~3-5 s.
+    Faz chamadas paralelas — tempo total ~3-5 s.
+    User-Agent de browser é obrigatório para ESPN não bloquear o request.
     """
     espn_date = date_str.replace("-", "")  # YYYYMMDD
 
@@ -1047,11 +1061,15 @@ def get_fixtures_from_espn(date_str: str) -> list:
         try:
             url = (f"https://site.api.espn.com/apis/site/v2"
                    f"/sports/soccer/{slug}/scoreboard")
-            r = requests.get(url, params={"dates": espn_date}, timeout=7)
+            r = requests.get(
+                url,
+                headers=_ESPN_HEADERS,
+                params={"dates": espn_date, "limit": 50},
+                timeout=8,
+            )
             if r.status_code != 200:
                 return []
             data = r.json()
-            # Nome real da liga vem de data["leagues"][0]["name"]
             real_league = league_name
             if data.get("leagues"):
                 real_league = data["leagues"][0].get("name", league_name)
@@ -1066,18 +1084,21 @@ def get_fixtures_from_espn(date_str: str) -> list:
             return []
 
     all_fixtures: list = []
-    with ThreadPoolExecutor(max_workers=len(ESPN_LEAGUE_SLUGS)) as pool:
-        futures = {
-            pool.submit(fetch_league, slug, name, country): slug
-            for slug, name, country in ESPN_LEAGUE_SLUGS
-        }
-        for fut in as_completed(futures, timeout=12):
-            try:
-                all_fixtures.extend(fut.result())
-            except Exception:
-                pass
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [
+                pool.submit(fetch_league, slug, name, country)
+                for slug, name, country in ESPN_LEAGUE_SLUGS
+            ]
+            # as_completed pode lançar TimeoutError — precisa estar no try externo
+            for fut in as_completed(futures, timeout=18):
+                try:
+                    all_fixtures.extend(fut.result())
+                except Exception:
+                    pass
+    except Exception:
+        pass  # TimeoutError ou qualquer falha no pool
 
-    # Ordena por horário, prioriza jogos ainda não encerrados
     all_fixtures.sort(key=lambda f: f.get("time", ""))
     return all_fixtures[:25]
 
