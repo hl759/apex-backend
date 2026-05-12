@@ -1487,29 +1487,47 @@ def fixtures_today():
             return _serve(file_fixtures, "file-cache", cached=True)
 
         # ── 3. API-Football (primária — melhor cobertura, 100 req/dia) ─────────
-        try:
-            res = requests.get(
-                f"{API_BASE}/fixtures",
-                headers=API_HEADERS,
-                params={"date": today, "timezone": "America/Sao_Paulo"},
-                timeout=15,
-            )
-            af_ok = (res.status_code == 200 and not res.json().get("errors"))
-        except Exception:
-            af_ok = False
+        def _fetch_apifootball(date: str):
+            try:
+                r = requests.get(
+                    f"{API_BASE}/fixtures",
+                    headers=API_HEADERS,
+                    params={"date": date, "timezone": "America/Sao_Paulo"},
+                    timeout=15,
+                )
+                if r.status_code == 200 and not r.json().get("errors"):
+                    return r.json().get("response", []), None
+                return None, r.json().get("errors") or r.status_code
+            except Exception as e:
+                return None, str(e)
 
-        if af_ok:
-            raw      = res.json().get("response", [])
-            fixtures = _parse_fixtures(raw)
-            _api_diag["api_football"] = {"ok": True, "http": 200, "total": len(raw), "parsed": len(fixtures)}
-            _write_file_cache(today, fixtures)
-            return _serve(fixtures, "api-football")
+        raw_today, af_err = _fetch_apifootball(today)
 
-        # Registra motivo da falha da API-Football
-        try:
-            af_err = res.json().get("errors") or res.status_code
-        except Exception:
-            af_err = "timeout/unreachable"
+        if raw_today is not None:
+            fixtures_today_raw = _parse_fixtures(raw_today)
+            filtered_today     = _filter_past_fixtures(fixtures_today_raw)
+            _api_diag["api_football"] = {
+                "ok": True, "http": 200,
+                "total": len(raw_today), "parsed": len(fixtures_today_raw),
+                "after_filter": len(filtered_today),
+            }
+
+            if filtered_today:
+                # Há jogos hoje — servir normalmente
+                _write_file_cache(today, fixtures_today_raw)
+                return _serve(fixtures_today_raw, "api-football")
+
+            # Hoje esvaziou (jogos terminaram) → buscar amanhã automaticamente
+            tomorrow = (datetime.utcnow() - timedelta(hours=3) + timedelta(days=1)).strftime("%Y-%m-%d")
+            raw_tmrw, _ = _fetch_apifootball(tomorrow)
+            if raw_tmrw is not None:
+                fixtures_tmrw = _parse_fixtures(raw_tmrw)
+                if fixtures_tmrw:
+                    _api_diag["api_football"]["tomorrow"] = {"total": len(raw_tmrw), "parsed": len(fixtures_tmrw)}
+                    _write_file_cache(today, fixtures_tmrw)
+                    return _serve(fixtures_tmrw, "api-football-tomorrow")
+
+        # Registra falha da API-Football
         _api_diag["api_football"] = {"ok": False, "error": str(af_err)}
 
         # ── 4. football-data.org (backup — sem limite diário) ─────────────────
