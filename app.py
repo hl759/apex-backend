@@ -1477,13 +1477,19 @@ def fixtures_today():
                 resp["cached"] = True
             return jsonify(resp)
 
-        # ── 1. Cache em memória (mais rápido) ─────────────────────────────────
-        if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
-            return _serve(c["data"], "memory-cache", cached=True)
+        def _has_valid(fixtures: list) -> bool:
+            """True se ainda há jogos válidos após filtro."""
+            return bool(_filter_past_fixtures(fixtures))
 
-        # ── 2. Cache em arquivo (sobrevive hibernações do Render) ──────────────
+        # ── 1. Cache em memória — só serve se ainda há jogos válidos ──────────
+        if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
+            if _has_valid(c["data"]):
+                return _serve(c["data"], "memory-cache", cached=True)
+            # Jogos do cache já terminaram — invalida e busca dados frescos
+
+        # ── 2. Cache em arquivo — só serve se ainda há jogos válidos ──────────
         file_fixtures = _read_file_cache(today)
-        if file_fixtures:
+        if file_fixtures and _has_valid(file_fixtures):
             return _serve(file_fixtures, "file-cache", cached=True)
 
         # ── 3. API-Football (primária — melhor cobertura, 100 req/dia) ─────────
