@@ -1527,6 +1527,7 @@ def analyze():
 
         # Contexto temporal — dia da semana e hora afetam análise
         now_brt    = datetime.utcnow() - timedelta(hours=3)
+        today_brt  = now_brt.strftime("%Y-%m-%d")
         weekday_pt = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
         day_label  = weekday_pt[now_brt.weekday()]
         time_label = now_brt.strftime("%H:%M")
@@ -1534,7 +1535,7 @@ def analyze():
 
         def format_fixture(f):
             fixture_date = f.get("date", "")
-            is_tomorrow  = fixture_date and fixture_date != today
+            is_tomorrow  = fixture_date and fixture_date != today_brt
             date_tag     = " [AMANHÃ]" if is_tomorrow else ""
             line = (f"- ID:{f['id']} | {f['home']} x {f['away']} | "
                     f"{f['league']} ({f['country']}) | {f['time']}{date_tag} | Status:{f['status']}")
@@ -1579,7 +1580,7 @@ REJEITE se: mercado já corrigiu | motivação assimétrica desfavorável | esta
 
 ━━━ CONTEXTO DO DIA ━━━
 Dia: {day_label}. {"Segunda/terça: menos jogos de elite, mais edge em ligas secundárias." if now_brt.weekday() <= 1 else "Quarta/quinta: tipicamente CL/EL — mercados altamente eficientes, edge raro." if now_brt.weekday() <= 3 else "Final de semana: maior volume, mais ação sharp, seja criterioso."}
-{"ATENÇÃO: Jogos marcados como [AMANHÃ] — analise como pré-jogo com mais tempo para mercado se mover." if any(f.get("date", "") != today for f in fixtures) else ""}
+{"ATENÇÃO: Jogos marcados como [AMANHÃ] — analise como pré-jogo com mais tempo para mercado se mover." if any(f.get("date", "") != today_brt for f in fixtures) else ""}
 
 ━━━ INSTRUÇÃO FINAL ━━━
 Use APENAS IDs e nomes EXATOS da lista acima.
