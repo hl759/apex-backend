@@ -1045,6 +1045,7 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
             "league":    ev.get("strLeague", ""),
             "country":   ev.get("strCountry", ""),
             "time":      time_str,
+            "date":      date_str,
             "status":    status,
             "score":     score,
             "elapsed":   elapsed,
@@ -1107,10 +1108,13 @@ def _parse_espn_event(ev: dict, league_name: str, country: str) -> dict | None:
         # Horário UTC → BRT
         raw_date = ev.get("date", "")
         try:
-            utc_dt   = datetime.strptime(raw_date[:16], "%Y-%m-%dT%H:%M")
-            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+            utc_dt    = datetime.strptime(raw_date[:16], "%Y-%m-%dT%H:%M")
+            brt_evt   = utc_dt - timedelta(hours=3)
+            time_str  = brt_evt.strftime("%H:%M")
+            ev_date   = brt_evt.strftime("%Y-%m-%d")
         except Exception:
             time_str = ""
+            ev_date  = ""
 
         # Nome da liga real (ESPN retorna no objeto leagues da resposta)
         real_league = ev.get("_league", league_name)
@@ -1122,6 +1126,7 @@ def _parse_espn_event(ev: dict, league_name: str, country: str) -> dict | None:
             "league":    real_league,
             "country":   country,
             "time":      time_str,
+            "date":      ev_date,
             "status":    status,
             "score":     score,
             "elapsed":   elapsed,
@@ -1231,9 +1236,12 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
         start_ts = ev.get("startTimestamp", 0)
         try:
             utc_dt   = datetime.utcfromtimestamp(start_ts)
-            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+            brt_ev   = utc_dt - timedelta(hours=3)
+            time_str = brt_ev.strftime("%H:%M")
+            ss_date  = brt_ev.strftime("%Y-%m-%d")
         except Exception:
             time_str = ""
+            ss_date  = ""
 
         # Placar
         hs = ev.get("homeScore", {}).get("current")
@@ -1265,6 +1273,7 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
             "league":    league_name,
             "country":   country,
             "time":      time_str,
+            "date":      ss_date,
             "status":    status,
             "score":     score,
             "elapsed":   elapsed,
@@ -1295,9 +1304,12 @@ def _parse_fd_matches(matches: list) -> list:
         utc_str = m.get("utcDate", "")
         try:
             utc_dt   = datetime.strptime(utc_str[:16], "%Y-%m-%dT%H:%M")
-            time_str = (utc_dt - timedelta(hours=3)).strftime("%H:%M")
+            brt_dt   = utc_dt - timedelta(hours=3)
+            time_str = brt_dt.strftime("%H:%M")
+            date_str = brt_dt.strftime("%Y-%m-%d")
         except Exception:
             time_str = ""
+            date_str = ""
 
         home = (m.get("homeTeam") or {}).get("name", "") or \
                (m.get("homeTeam") or {}).get("shortName", "")
@@ -1322,6 +1334,7 @@ def _parse_fd_matches(matches: list) -> list:
             "league":    league_name,
             "country":   country,
             "time":      time_str,
+            "date":      date_str,
             "status":    status,
             "score":     score,
             "elapsed":   elapsed,
@@ -1363,13 +1376,17 @@ def get_fixtures_from_football_data(date_str: str) -> list:
     date_to  = (base_dt + timedelta(days=7)).strftime("%Y-%m-%d")
 
     def _pick_first_day(raw: list) -> list:
-        """Agrupa por data e retorna fixtures do primeiro dia com jogos."""
+        """Agrupa por data BRT e retorna fixtures do primeiro dia com jogos."""
         by_date: dict = {}
         for m in raw:
             utc_str = m.get("utcDate", "")
-            day = utc_str[:10] if utc_str else ""
-            if day:
-                by_date.setdefault(day, []).append(m)
+            if utc_str:
+                try:
+                    brt_day = (datetime.strptime(utc_str[:16], "%Y-%m-%dT%H:%M")
+                               - timedelta(hours=3)).strftime("%Y-%m-%d")
+                except Exception:
+                    brt_day = utc_str[:10]
+                by_date.setdefault(brt_day, []).append(m)
         for offset in range(8):
             day = (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
             fixtures = _parse_fd_matches(by_date.get(day, []))
@@ -1539,7 +1556,7 @@ def fixtures_today():
         # ── 4. football-data.org (backup — sem limite diário) ─────────────────
         if FOOTBALL_DATA_KEY:
             fd = get_fixtures_from_football_data(today)
-            if fd:
+            if fd and _has_valid(fd):
                 _write_file_cache(today, fd)
                 return _serve(fd, "football-data")
 
