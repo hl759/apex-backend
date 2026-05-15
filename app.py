@@ -11,10 +11,13 @@ import time
 app = Flask(__name__)
 CORS(app)
 
-# api-sports.io
+# API-Football via RapidAPI
 API_KEY  = os.environ.get("API_KEY", "")
-API_BASE = "https://v3.football.api-sports.io"
-API_HEADERS = {"x-apisports-key": API_KEY}
+API_BASE = "https://api-football-v1.p.rapidapi.com/v3"
+API_HEADERS = {
+    "X-RapidAPI-Key":  API_KEY,
+    "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
+}
 
 # TheSportsDB — API gratuita sem limite diário (alternativa à API-Football)
 THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
