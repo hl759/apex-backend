@@ -893,15 +893,33 @@ def validate_opportunities(matches):
 
 
 def parse_ai_response(raw):
-    try:
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        start = clean.find("{")
-        end = clean.rfind("}") + 1
-        if start >= 0 and end > start:
-            clean = clean[start:end]
-        return json.loads(clean)
-    except Exception:
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    start = clean.find("{")
+    if start < 0:
         return {"type": "chat", "message": raw}
+
+    # Tenta o JSON completo primeiro
+    end = clean.rfind("}") + 1
+    if end > start:
+        try:
+            return json.loads(clean[start:end])
+        except Exception:
+            pass
+
+    # JSON truncado — tenta recuperar fechando o objeto manualmente
+    # Procura o último "}" que fecha um objeto com "matches"
+    partial = clean[start:]
+    for i in range(len(partial) - 1, -1, -1):
+        if partial[i] == "}":
+            try:
+                result = json.loads(partial[:i + 1])
+                if isinstance(result, dict) and result.get("type"):
+                    result["truncated"] = True
+                    return result
+            except Exception:
+                continue
+
+    return {"type": "chat", "message": raw}
 
 
 def _num(val, default, lo, hi):
@@ -1703,7 +1721,7 @@ def analyze():
         # Cap inteligente para controlar tokens no Groq: live têm prioridade total,
         # pré-jogo limitado a completar 25 slots. Preserva qualidade da análise
         # e evita estourar o limite de 6k TPM do free tier.
-        _MAX_ANALYZE = 40
+        _MAX_ANALYZE = 20
         live_fixtures    = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures = [f for f in fixtures if f.get("status") not in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures.sort(key=lambda f: f.get("time", ""))
@@ -1790,7 +1808,7 @@ marketAlert: alerta se detectar movimento suspeito ou oportunidade urgente (null
 JSON puro, sem markdown. Tipo "analysis"."""
 
         messages = history[-4:] + [{"role": "user", "content": prompt}]
-        raw = call_groq(messages, max_tokens=4000, model=GROQ_MODEL_ANALYSIS, temperature=0.25)
+        raw = call_groq(messages, max_tokens=6000, model=GROQ_MODEL_ANALYSIS, temperature=0.25)
         parsed = parse_ai_response(raw)
 
         # Validação 1: remove jogos inventados pelo AI
