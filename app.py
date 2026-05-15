@@ -1700,7 +1700,7 @@ def analyze():
         # Cap inteligente para controlar tokens no Groq: live têm prioridade total,
         # pré-jogo limitado a completar 25 slots. Preserva qualidade da análise
         # e evita estourar o limite de 6k TPM do free tier.
-        _MAX_ANALYZE = 25
+        _MAX_ANALYZE = 40
         live_fixtures    = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures = [f for f in fixtures if f.get("status") not in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures.sort(key=lambda f: f.get("time", ""))
