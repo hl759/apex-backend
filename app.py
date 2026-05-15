@@ -26,26 +26,64 @@ BETANO_LEAGUES_TSDB = {
     "brasileirão", "brasileirao", "brasileir",
     "serie a", "série a", "serie b", "série b",
     "copa do brasil", "paulista", "carioca", "gaucho", "gaúcho",
+    "paranaense", "mineiro", "baiano", "pernambucano", "goiano",
     # Europa Top 5
     "premier league", "championship",
     "ligue 1", "ligue 2",
     "bundesliga",
     "la liga",
+    "serie a", "serie b",
     "eredivisie",
     "primeira liga",
     "jupiler",
     "scottish premier",
+    # Europa — outras ligas cobertas pela Betano
+    "superliga", "danish superliga", "allsvenskan", "eliteserien",
+    "super league", "swiss super",
+    "austrian bundesliga", "austria",
+    "greek super", "super league greece",
+    "hnl", "croatian",
+    "liga i", "romanian",
+    "ukrainian premier", "premier liga ukraine",
+    "first league", "czech",
+    "super liga", "serbian",
+    "ligat ha'al", "israeli premier",
+    "ekstraklasa",
+    "fortuna liga", "slovak",
+    "veikkausliiga", "finnish",
+    "premier league russia", "russian premier",
+    "meistriliiga", "estonian",
+    "a lyga", "lithuanian",
+    "virsliga", "latvian",
+    "nemzeti bajnokság", "hungarian",
+    "premier league of belarus", "belarusian",
+    "nations league",
     # Competições europeias
     "champions league", "europa league", "conference league",
     # América do Sul
     "libertadores", "sudamericana",
     "liga profesional", "apertura", "clausura",
+    "primera división", "primera division",
+    "liga pro", "ligapro", "ecuadorian",
+    "descentralizado", "peruvian",
+    "campeonato uruguayo", "uruguayan",
+    "primera división de chile", "chilean",
+    "venezuelan", "primera",
+    "liga betplay", "colombian",
     # Internacional
     "liga mx", "mls",
     "saudi pro", "saudi premier",
     "super lig", "süper lig",
-    "ekstraklasa",
-    "russian premier",
+    "j1 league", "j-league", "japanese",
+    "chinese super", "china super",
+    "k league", "korean",
+    "a-league", "australian",
+    "qatar stars", "qsl",
+    "uae pro", "arabian gulf",
+    "egypt premier", "egyptian",
+    "south african premier", "psl",
+    "copa america", "world cup", "copa del rey",
+    "fa cup", "dfb pokal", "coppa italia",
     "argentine", "argentina",
 }
 
@@ -82,9 +120,42 @@ ESPN_LEAGUE_SLUGS = [
     ("bra.2",                 "Brasileirao Serie B",     "Brazil"),
     ("usa.1",                 "MLS",                     "USA"),
     ("mex.1",                 "Liga MX",                 "Mexico"),
+    ("arg.1",                 "Liga Profesional",        "Argentina"),
+    ("col.1",                 "Liga Betplay",            "Colombia"),
+    ("chi.1",                 "Primera División",        "Chile"),
+    ("uru.1",                 "Primera División",        "Uruguay"),
+    ("ecu.1",                 "LigaPro",                 "Ecuador"),
+    ("per.1",                 "Primera División",        "Peru"),
+    ("ven.1",                 "Primera División",        "Venezuela"),
+    ("den.1",                 "Superliga",               "Denmark"),
+    ("nor.1",                 "Eliteserien",             "Norway"),
+    ("swe.1",                 "Allsvenskan",             "Sweden"),
+    ("sui.1",                 "Super League",            "Switzerland"),
+    ("aut.1",                 "Bundesliga",              "Austria"),
+    ("gre.1",                 "Super League",            "Greece"),
+    ("cro.1",                 "HNL",                     "Croatia"),
+    ("rom.1",                 "Liga I",                  "Romania"),
+    ("ukr.1",                 "Premier League",          "Ukraine"),
+    ("cze.1",                 "First League",            "Czech Republic"),
+    ("srb.1",                 "Super Liga",              "Serbia"),
+    ("isr.1",                 "Premier League",          "Israel"),
+    ("jpn.1",                 "J1 League",               "Japan"),
+    ("chn.1",                 "Super League",            "China"),
+    ("kor.1",                 "K League 1",              "South Korea"),
+    ("aus.1",                 "A-League",                "Australia"),
+    ("tur.1",                 "Süper Lig",               "Turkey"),
+    ("pol.1",                 "Ekstraklasa",             "Poland"),
+    ("rus.1",                 "Premier League",          "Russia"),
+    ("sau.1",                 "Pro League",              "Saudi Arabia"),
+    ("qat.1",                 "Stars League",            "Qatar"),
+    ("egy.1",                 "Premier League",          "Egypt"),
+    ("rsa.1",                 "Premier Soccer League",   "South Africa"),
+    ("uae.1",                 "Pro League",              "UAE"),
     ("uefa.champions",        "Champions League",        "Europe"),
     ("uefa.europa",           "Europa League",           "Europe"),
+    ("uefa.europa.conf",      "Conference League",       "Europe"),
     ("conmebol.libertadores", "Copa Libertadores",       "South America"),
+    ("conmebol.sudamericana", "Copa Sudamericana",       "South America"),
 ]
 
 ESPN_STATUS_MAP = {
@@ -199,41 +270,113 @@ GROQ_MODEL_FALLBACK  = "llama-3.1-8b-instant"      # Fallback com prompt compact
 
 # ── Ligas que a Betano cobre (IDs da API-Football) ─────────────────────────
 BETANO_LEAGUE_IDS = {
-    # Brasil
+    # ── Brasil ────────────────────────────────────────────────────────────────
     71,   # Brasileirão Série A
     72,   # Brasileirão Série B
     73,   # Copa do Brasil
     475,  # Campeonato Paulista
     476,  # Campeonato Carioca
-    # Europa - Top 5
-    39,   # Premier League
-    40,   # Championship
-    61,   # Ligue 1
-    78,   # Bundesliga
-    79,   # Bundesliga 2
-    135,  # Serie A
-    136,  # Serie B
-    140,  # La Liga
-    141,  # La Liga 2
-    88,   # Eredivisie
+    477,  # Campeonato Gaúcho
+    478,  # Campeonato Mineiro
+    479,  # Campeonato Paranaense
+    480,  # Campeonato Baiano
+    481,  # Campeonato Pernambucano
+    # ── Europa — Top 5 + Ligas importantes ───────────────────────────────────
+    39,   # Premier League (Inglaterra)
+    40,   # Championship (Inglaterra)
+    45,   # FA Cup
+    61,   # Ligue 1 (França)
+    62,   # Ligue 2 (França)
+    66,   # Coupe de France
+    78,   # Bundesliga (Alemanha)
+    79,   # 2. Bundesliga (Alemanha)
+    81,   # DFB Pokal
+    135,  # Serie A (Itália)
+    136,  # Serie B (Itália)
+    137,  # Coppa Italia
+    140,  # La Liga (Espanha)
+    141,  # La Liga 2 (Espanha)
+    143,  # Copa del Rey
+    88,   # Eredivisie (Holanda)
+    89,   # Eerste Divisie (Holanda)
     94,   # Primeira Liga (Portugal)
-    144,  # Jupiler Pro League
-    179,  # Scottish Premiership
-    # Competições europeias
+    95,   # Segunda Liga (Portugal)
+    144,  # Jupiler Pro League (Bélgica)
+    179,  # Scottish Premiership (Escócia)
+    # ── Europa — Outras ligas cobertas pela Betano ───────────────────────────
+    119,  # Superliga (Dinamarca)
+    120,  # 1st Division (Dinamarca)
+    103,  # Eliteserien (Noruega)
+    113,  # Allsvenskan (Suécia)
+    114,  # Superettan (Suécia)
+    207,  # Swiss Super League
+    218,  # Austrian Bundesliga
+    197,  # Greek Super League
+    210,  # Croatian HNL
+    283,  # Romanian Liga I
+    333,  # Ukrainian Premier League
+    345,  # Czech First League
+    286,  # Serbian Super Liga
+    384,  # Israeli Premier League
+    106,  # Ekstraklasa (Polônia)
+    235,  # Russian Premier League
+    271,  # Slovak Super Liga
+    244,  # Finnish Veikkausliiga
+    372,  # Estonian Premium Liiga
+    392,  # Lithuanian A Lyga
+    115,  # Latvian Virsliga
+    343,  # Hungarian Nemzeti Bajnokság
+    116,  # Belarusian Premier League
+    203,  # Süper Lig (Turquia)
+    204,  # TFF First League (Turquia)
+    # ── Competições europeias ─────────────────────────────────────────────────
     2,    # Champions League
     3,    # Europa League
     848,  # Conference League
-    # América do Sul
+    5,    # UEFA Nations League
+    531,  # UEFA Super Cup
+    4,    # Euro (Europeu)
+    1,    # World Cup
+    # ── Copas nacionais (Europa) ──────────────────────────────────────────────
+    529,  # Super Cup Espanha
+    547,  # Scottish FA Cup
+    543,  # Belgian Cup
+    # ── América do Sul ────────────────────────────────────────────────────────
     11,   # Copa Libertadores
     13,   # Copa Sudamericana
     128,  # Liga Profesional Argentina
-    239,  # Liga MX
-    253,  # MLS
-    # Outros relevantes
+    130,  # Copa Argentina
+    131,  # Primera Nacional (Arg B)
+    238,  # Liga Betplay (Colômbia)
+    265,  # Primera B (Colômbia)
+    240,  # Primera División Chile
+    241,  # Primera B Chile
+    278,  # Campeonato Uruguayo
+    268,  # LigaPro (Equador)
+    281,  # Liga 1 (Peru)
+    295,  # Primera División Venezuela
+    9,    # Copa América
+    # ── América do Norte / Central ────────────────────────────────────────────
+    239,  # Liga MX (México)
+    262,  # Liga de Expansión MX
+    253,  # MLS (EUA)
+    254,  # USL Championship (EUA)
+    # ── Ásia ─────────────────────────────────────────────────────────────────
+    98,   # J1 League (Japão)
+    99,   # J2 League (Japão)
+    169,  # Chinese Super League
+    292,  # K League 1 (Coreia do Sul)
+    293,  # K League 2 (Coreia do Sul)
+    29,   # Qatar Stars League
+    435,  # UAE Pro League
+    17,   # A-League (Austrália)
+    # ── Oriente Médio / África ────────────────────────────────────────────────
     307,  # Saudi Pro League
-    203,  # Süper Lig (Turquia)
-    106,  # Ekstraklasa (Polônia)
-    235,  # Russian Premier League
+    233,  # Egyptian Premier League
+    288,  # South African Premier Division
+    # ── Competições mundiais de clubes ────────────────────────────────────────
+    15,   # FIFA Club World Cup
+    26,   # CONCACAF Champions League
 }
 
 # ── Funções de dados em tempo real (API-Football) ──────────────────────────
@@ -889,7 +1032,7 @@ def _parse_fixtures(response):
             "league_id": league_id,
             "source":    "api-football",
         })
-    return fixtures[:25]
+    return fixtures[:60]
 
 
 def get_fixtures_from_thesportsdb(date_str: str) -> list:
@@ -982,7 +1125,7 @@ def get_fixtures_from_thesportsdb(date_str: str) -> list:
     # Prefere ligas Betano; se o filtro não retornar nada, usa todos os jogos
     # disponíveis (melhor que retornar erro)
     result = betano if betano else others
-    return result[:20]
+    return result[:60]
 
 
 def _parse_espn_event(ev: dict, league_name: str, country: str) -> dict | None:
@@ -1106,13 +1249,13 @@ def get_fixtures_from_espn(date_str: str) -> list:
 
     all_fixtures: list = []
     try:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=12) as pool:
             futures = [
                 pool.submit(fetch_league, slug, name, country)
                 for slug, name, country in ESPN_LEAGUE_SLUGS
             ]
             # as_completed pode lançar TimeoutError — precisa estar no try externo
-            for fut in as_completed(futures, timeout=18):
+            for fut in as_completed(futures, timeout=22):
                 try:
                     all_fixtures.extend(fut.result())
                 except Exception:
@@ -1121,7 +1264,7 @@ def get_fixtures_from_espn(date_str: str) -> list:
         pass  # TimeoutError ou qualquer falha no pool
 
     all_fixtures.sort(key=lambda f: f.get("time", ""))
-    return all_fixtures[:25]
+    return all_fixtures[:60]
 
 
 def get_fixtures_from_sofascore(date_str: str) -> list:
@@ -1208,7 +1351,7 @@ def get_fixtures_from_sofascore(date_str: str) -> list:
 
     result = betano if betano else others
     result.sort(key=lambda f: f.get("time", ""))
-    return result[:25]
+    return result[:60]
 
 
 def _parse_fd_matches(matches: list) -> list:
@@ -1333,7 +1476,7 @@ def get_fixtures_from_football_data(date_str: str) -> list:
                 diag["total_parsed"] = len(fixtures)
                 diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw})
                 _api_diag["football_data"] = diag
-                return fixtures[:25]
+                return fixtures[:60]
 
         # Tentativa 2: sem filtro (retorna tudo acessível no plano)
         result2 = _fd_fetch_week(date_str, date_to, None)
@@ -1352,7 +1495,7 @@ def get_fixtures_from_football_data(date_str: str) -> list:
                 diag["total_parsed"] = len(fixtures2)
                 diag["competitions"] = list({m.get("competition", {}).get("name", "") for m in raw2})
                 _api_diag["football_data"] = diag
-                return fixtures2[:25]
+                return fixtures2[:60]
 
         # Nenhuma tentativa encontrou jogos
         diag["error"] = (
@@ -1514,8 +1657,16 @@ def analyze():
         if not fixtures:
             return jsonify({"success": False, "error": "Nenhum fixture enviado"}), 400
 
+        # Cap inteligente para controlar tokens no Groq: live têm prioridade total,
+        # pré-jogo limitado a completar 25 slots. Preserva qualidade da análise
+        # e evita estourar o limite de 6k TPM do free tier.
+        _MAX_ANALYZE = 25
         live_fixtures    = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures = [f for f in fixtures if f.get("status") not in ["1H", "2H", "HT", "ET", "LIVE"]]
+        prelive_fixtures.sort(key=lambda f: f.get("time", ""))
+        prelive_cap      = max(0, _MAX_ANALYZE - len(live_fixtures))
+        prelive_fixtures = prelive_fixtures[:prelive_cap]
+        fixtures         = live_fixtures + prelive_fixtures
 
         # ── Busca dados em tempo real (não bloqueia se falhar) ──────────────
         unique_league_ids = list({f.get("league_id") for f in fixtures if f.get("league_id")})
