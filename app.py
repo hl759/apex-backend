@@ -1249,13 +1249,13 @@ def get_fixtures_from_espn(date_str: str) -> list:
 
     all_fixtures: list = []
     try:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=12) as pool:
             futures = [
                 pool.submit(fetch_league, slug, name, country)
                 for slug, name, country in ESPN_LEAGUE_SLUGS
             ]
             # as_completed pode lançar TimeoutError — precisa estar no try externo
-            for fut in as_completed(futures, timeout=18):
+            for fut in as_completed(futures, timeout=22):
                 try:
                     all_fixtures.extend(fut.result())
                 except Exception:
@@ -1657,8 +1657,16 @@ def analyze():
         if not fixtures:
             return jsonify({"success": False, "error": "Nenhum fixture enviado"}), 400
 
+        # Cap inteligente para controlar tokens no Groq: live têm prioridade total,
+        # pré-jogo limitado a completar 25 slots. Preserva qualidade da análise
+        # e evita estourar o limite de 6k TPM do free tier.
+        _MAX_ANALYZE = 25
         live_fixtures    = [f for f in fixtures if f.get("status") in ["1H", "2H", "HT", "ET", "LIVE"]]
         prelive_fixtures = [f for f in fixtures if f.get("status") not in ["1H", "2H", "HT", "ET", "LIVE"]]
+        prelive_fixtures.sort(key=lambda f: f.get("time", ""))
+        prelive_cap      = max(0, _MAX_ANALYZE - len(live_fixtures))
+        prelive_fixtures = prelive_fixtures[:prelive_cap]
+        fixtures         = live_fixtures + prelive_fixtures
 
         # ── Busca dados em tempo real (não bloqueia se falhar) ──────────────
         unique_league_ids = list({f.get("league_id") for f in fixtures if f.get("league_id")})
