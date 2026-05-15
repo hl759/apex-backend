@@ -1547,12 +1547,14 @@ def fixtures_today():
         today = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")  # data BRT
         now   = time.time()
         c     = _fixtures_cache
+        force_refresh = request.args.get("refresh", "").lower() in ("1", "true", "yes")
 
         def _serve(fixtures: list, source: str, cached: bool = False) -> object:
             filtered = _filter_past_fixtures(fixtures)
             c["data"] = fixtures; c["ts"] = now; c["date"] = today
             resp = {"success": True, "count": len(filtered),
-                    "fixtures": filtered, "date": today, "source": source}
+                    "fixtures": filtered, "date": today, "source": source,
+                    "diag": _api_diag}
             if cached:
                 resp["cached"] = True
             return jsonify(resp)
@@ -1562,15 +1564,16 @@ def fixtures_today():
             return bool(_filter_past_fixtures(fixtures))
 
         # ── 1. Cache em memória — só serve se ainda há jogos válidos ──────────
-        if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
-            if _has_valid(c["data"]):
-                return _serve(c["data"], "memory-cache", cached=True)
-            # Jogos do cache já terminaram — invalida e busca dados frescos
+        if not force_refresh:
+            if c["data"] is not None and c["date"] == today and (now - c["ts"]) < _FIXTURES_TTL:
+                if _has_valid(c["data"]):
+                    return _serve(c["data"], "memory-cache", cached=True)
+                # Jogos do cache já terminaram — invalida e busca dados frescos
 
-        # ── 2. Cache em arquivo — só serve se ainda há jogos válidos ──────────
-        file_fixtures = _read_file_cache(today)
-        if file_fixtures and _has_valid(file_fixtures):
-            return _serve(file_fixtures, "file-cache", cached=True)
+            # ── 2. Cache em arquivo — só serve se ainda há jogos válidos ──────────
+            file_fixtures = _read_file_cache(today)
+            if file_fixtures and _has_valid(file_fixtures):
+                return _serve(file_fixtures, "file-cache", cached=True)
 
         # ── 3. API-Football (primária — melhor cobertura, 100 req/dia) ─────────
         def _fetch_apifootball(date: str):
@@ -1587,29 +1590,64 @@ def fixtures_today():
             except Exception as e:
                 return None, str(e)
 
+        # Threshold: se hoje tem poucos jogos, complementa com amanhã
+        MIN_GAMES = 8
+        tomorrow = (datetime.utcnow() - timedelta(hours=3) + timedelta(days=1)).strftime("%Y-%m-%d")
+
         raw_today, af_err = _fetch_apifootball(today)
 
         if raw_today is not None:
             fixtures_today_raw = _parse_fixtures(raw_today)
             filtered_today     = _filter_past_fixtures(fixtures_today_raw)
+
+            # Leagues seen in raw response (for diagnostics)
+            leagues_raw = {}
+            for f in raw_today:
+                lid  = f.get("league", {}).get("id", 0)
+                name = f.get("league", {}).get("name", "?")
+                leagues_raw[lid] = name
+            leagues_matched = {
+                f.get("league_id"): f.get("league") for f in fixtures_today_raw
+            }
+
             _api_diag["api_football"] = {
-                "ok": True, "http": 200,
-                "total": len(raw_today), "parsed": len(fixtures_today_raw),
-                "after_filter": len(filtered_today),
+                "ok":              True,
+                "http":            200,
+                "total_raw":       len(raw_today),
+                "total_leagues":   len(leagues_raw),
+                "parsed":          len(fixtures_today_raw),
+                "after_filter":    len(filtered_today),
+                "leagues_matched": leagues_matched,
             }
 
             if filtered_today:
-                # Há jogos hoje — servir normalmente
+                if len(filtered_today) >= MIN_GAMES:
+                    # Jogos suficientes hoje — servir normalmente
+                    _write_file_cache(today, fixtures_today_raw)
+                    return _serve(fixtures_today_raw, "api-football")
+
+                # Poucos jogos hoje — complementa com amanhã
+                raw_tmrw, _ = _fetch_apifootball(tomorrow)
+                if raw_tmrw is not None:
+                    fixtures_tmrw = _parse_fixtures(raw_tmrw)
+                    combined = fixtures_today_raw + fixtures_tmrw
+                    combined.sort(key=lambda f: (f.get("date", ""), f.get("time", "")))
+                    _api_diag["api_football"]["tomorrow"] = {
+                        "total_raw": len(raw_tmrw), "parsed": len(fixtures_tmrw)
+                    }
+                    _write_file_cache(today, combined)
+                    return _serve(combined, "api-football-combined")
+
+                # Amanhã indisponível — serve só hoje
                 _write_file_cache(today, fixtures_today_raw)
                 return _serve(fixtures_today_raw, "api-football")
 
             # Hoje esvaziou (jogos terminaram) → buscar amanhã automaticamente
-            tomorrow = (datetime.utcnow() - timedelta(hours=3) + timedelta(days=1)).strftime("%Y-%m-%d")
             raw_tmrw, _ = _fetch_apifootball(tomorrow)
             if raw_tmrw is not None:
                 fixtures_tmrw = _parse_fixtures(raw_tmrw)
                 if fixtures_tmrw:
-                    _api_diag["api_football"]["tomorrow"] = {"total": len(raw_tmrw), "parsed": len(fixtures_tmrw)}
+                    _api_diag["api_football"]["tomorrow"] = {"total_raw": len(raw_tmrw), "parsed": len(fixtures_tmrw)}
                     _write_file_cache(today, fixtures_tmrw)
                     return _serve(fixtures_tmrw, "api-football-tomorrow")
 
