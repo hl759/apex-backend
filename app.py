@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 
 # api-sports.io
-API_KEY  = os.environ.get("API_KEY", "98e06cbc3c531496be35529357044cfc")
+API_KEY  = os.environ.get("API_KEY", "")
 API_BASE = "https://v3.football.api-sports.io"
 API_HEADERS = {"x-apisports-key": API_KEY}
 
