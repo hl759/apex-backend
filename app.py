@@ -1438,8 +1438,8 @@ def get_fixtures_from_football_data(date_str: str) -> list:
     base_dt  = datetime.strptime(date_str, "%Y-%m-%d")
     date_to  = (base_dt + timedelta(days=7)).strftime("%Y-%m-%d")
 
-    def _pick_first_day(raw: list) -> list:
-        """Agrupa por data BRT e retorna fixtures do primeiro dia com jogos."""
+    def _pick_first_day(raw: list, min_count: int = 8) -> list:
+        """Agrupa por data BRT e acumula dias consecutivos até atingir min_count jogos."""
         by_date: dict = {}
         for m in raw:
             utc_str = m.get("utcDate", "")
@@ -1450,12 +1450,14 @@ def get_fixtures_from_football_data(date_str: str) -> list:
                 except Exception:
                     brt_day = utc_str[:10]
                 by_date.setdefault(brt_day, []).append(m)
+        collected = []
         for offset in range(8):
             day = (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-            fixtures = _parse_fd_matches(by_date.get(day, []))
-            if fixtures:
-                return fixtures
-        return []
+            day_fixtures = _parse_fd_matches(by_date.get(day, []))
+            collected.extend(day_fixtures)
+            if len(collected) >= min_count:
+                break
+        return collected
 
     diag: dict = {"date_from": date_str, "date_to": date_to, "ok": False}
     try:
