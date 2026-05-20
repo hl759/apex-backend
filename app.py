@@ -1960,8 +1960,28 @@ marketAlert: alerta se detectar movimento suspeito ou oportunidade urgente (null
 
 JSON puro, sem markdown. Tipo "analysis"."""
 
-        messages = history[-4:] + [{"role": "user", "content": prompt}]
-        raw = call_groq(messages, max_tokens=6000, model=GROQ_MODEL_ANALYSIS, temperature=0.25)
+        def _trim_history(hist, max_chars=600):
+            trimmed = []
+            for msg in hist:
+                content = msg.get("content", "")
+                if len(content) > max_chars:
+                    content = content[:max_chars] + "...[truncado]"
+                trimmed.append({**msg, "content": content})
+            return trimmed
+
+        messages = _trim_history(history[-4:]) + [{"role": "user", "content": prompt}]
+        try:
+            raw = call_groq(messages, max_tokens=6000, model=GROQ_MODEL_ANALYSIS, temperature=0.25)
+        except Exception as groq_ex:
+            err_str = str(groq_ex)
+            if "429" in err_str or "413" in err_str or "rate" in err_str.lower():
+                return jsonify({"success": True, "result": {
+                    "type": "analysis", "matches": [],
+                    "dailySummary": "⚠️ Limite de requisições atingido — aguarde 1 minuto e tente novamente.",
+                    "marketAlert": "Rate limit Groq atingido. Aguarde ~1 min e recarregue.",
+                    "accumulator": None, "validated": True,
+                }}), 200
+            return jsonify({"success": False, "error": f"Erro ao chamar IA: {err_str}"}), 500
         parsed = parse_ai_response(raw)
 
         # Recuperação: se parse_ai_response devolveu type "chat" com conteúdo JSON
