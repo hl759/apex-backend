@@ -2033,18 +2033,30 @@ JSON puro, sem markdown. Tipo "analysis"."""
                 return s.split("|")[0].strip()  # caso venha "ID:123 | ..."
 
             valid_matches = []
-            for match in parsed.get("matches", []):
-                mid       = extract_id(match.get("id", ""))
-                mname     = f"{match.get('homeTeam','')} x {match.get('awayTeam','')}".lower().strip()
-                id_ok     = mid in real_ids
-                name_ok   = mname in real_names
-                # Tolerância extra: qualquer real_name que contenha os dois times
-                fuzzy_ok  = any(
-                    match.get("homeTeam","").lower() in rn and match.get("awayTeam","").lower() in rn
+            ai_matches_raw = parsed.get("matches", [])
+            app.logger.info(f"[validate] real_ids={list(real_ids)[:8]}  real_names_count={len(real_names)}")
+            app.logger.info(f"[validate] AI returned {len(ai_matches_raw)} matches")
+            for match in ai_matches_raw:
+                mid        = extract_id(match.get("id", ""))
+                home_lower = match.get("homeTeam","").lower().strip()
+                away_lower = match.get("awayTeam","").lower().strip()
+                mname      = f"{home_lower} x {away_lower}"
+                id_ok      = mid in real_ids
+                name_ok    = mname in real_names
+                # Fuzzy: basta UM dos times aparecer como substring em qualquer jogo real
+                # (cobre abreviações como "Man Utd" vs "Manchester United")
+                fuzzy_ok   = any(
+                    (home_lower and home_lower in rn) or (away_lower and away_lower in rn)
                     for rn in real_names
                 ) if not name_ok else True
-                if id_ok or name_ok or fuzzy_ok:
+                kept = id_ok or name_ok or fuzzy_ok
+                app.logger.info(
+                    f"[validate] {mid} | {match.get('homeTeam')} x {match.get('awayTeam')}"
+                    f" → id_ok={id_ok} name_ok={name_ok} fuzzy_ok={fuzzy_ok} → {'KEPT' if kept else 'DROPPED'}"
+                )
+                if kept:
                     valid_matches.append(match)
+            app.logger.info(f"[validate] {len(ai_matches_raw)} → {len(valid_matches)} matches after validation")
             parsed["matches"] = valid_matches
 
             # Validação 2: remove entradas impossíveis ao vivo
