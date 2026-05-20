@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import json
 import time
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -217,6 +218,7 @@ _FD_COMPETITIONS = "PL,ELC,BL1,PD,SA,FL1,DED,PPL,CL,EC,BSA"
 
 # Diagnóstico em tempo real — atualizado a cada chamada às APIs de fixtures
 _api_diag: dict = {}
+_diag_lock = threading.Lock()
 
 # ── Caches para proteger a cota de 100 req/dia da API-Football ─────────────
 _standings_cache: dict = {}
@@ -224,6 +226,7 @@ _standings_cache_date: str = ""
 
 # ── Cache em memória (perdido na hibernação do Render) ────────────────────────
 _fixtures_cache: dict = {"data": None, "ts": 0, "date": ""}
+_cache_lock = threading.Lock()
 _FIXTURES_TTL = 900  # 15 min — reduz chamadas dentro do mesmo ciclo ativo
 
 # ── Cache em arquivo (sobrevive hibernações, perdido apenas no redeploy) ───────
@@ -402,13 +405,13 @@ def get_standings_for_leagues(league_ids: list) -> dict:
     Limita novas requisições a 4 por chamada para proteger cota de 100 req/dia.
     """
     global _standings_cache, _standings_cache_date
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")
     if _standings_cache_date != today:
         _standings_cache = {}
         _standings_cache_date = today
 
     result = {}
-    current_year = datetime.now().year
+    current_year = (datetime.utcnow() - timedelta(hours=3)).year
     new_requests = 0  # máx 4 novas req por chamada
     for lid in league_ids:
         if lid in _standings_cache:
@@ -1600,6 +1603,11 @@ def _filter_past_fixtures(fixtures: list) -> list:
             result.append(f)
             continue
         fixture_date = f.get("date") or today_brt
+        # Valida formato da data antes de comparar (evita erro com "2026/05/20" etc.)
+        try:
+            datetime.strptime(fixture_date, "%Y-%m-%d")
+        except ValueError:
+            fixture_date = today_brt
         # Jogo de data futura: sempre manter
         if fixture_date > today_brt:
             result.append(f)
@@ -1624,10 +1632,13 @@ def fixtures_today():
 
         def _serve(fixtures: list, source: str, cached: bool = False) -> object:
             filtered = _filter_past_fixtures(fixtures)
-            c["data"] = fixtures; c["ts"] = now; c["date"] = today
+            with _cache_lock:
+                c["data"] = fixtures; c["ts"] = now; c["date"] = today
+            with _diag_lock:
+                diag_snapshot = dict(_api_diag)
             resp = {"success": True, "count": len(filtered),
                     "fixtures": filtered, "date": today, "source": source,
-                    "diag": _api_diag}
+                    "diag": diag_snapshot}
             if cached:
                 resp["cached"] = True
             return jsonify(resp)
@@ -1730,9 +1741,17 @@ def fixtures_today():
         # ── 4. football-data.org (backup — sem limite diário) ─────────────────
         if FOOTBALL_DATA_KEY:
             fd = get_fixtures_from_football_data(today)
-            if fd and _has_valid(fd):
-                _write_file_cache(today, fd)
-                return _serve(fd, "football-data")
+            if fd:
+                # Mesma lógica de threshold da API-Football: < 8 jogos → inclui amanhã
+                if _has_valid(fd) and len(_filter_past_fixtures(fd)) < MIN_GAMES:
+                    fd_tmrw = get_fixtures_from_football_data(tomorrow)
+                    if fd_tmrw:
+                        fd = fd + fd_tmrw
+                        fd.sort(key=lambda f: (f.get("date", ""), f.get("time", "")))
+                        _api_diag.setdefault("football_data", {})["tomorrow_merged"] = len(fd_tmrw)
+                if _has_valid(fd):
+                    _write_file_cache(today, fd)
+                    return _serve(fd, "football-data")
 
         # ── 5. Cache antigo (stale) ────────────────────────────────────────────
         if c["data"] is not None:
@@ -1934,7 +1953,7 @@ def chat():
 @app.route("/fixtures/debug")
 def fixtures_debug():
     """Testa conectividade com cada fonte de fixtures e retorna diagnóstico."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d")  # sempre BRT
     results = {}
 
     # Testa football-data.org
