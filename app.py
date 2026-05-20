@@ -701,6 +701,26 @@ Use Kelly 25%: f_real = 25% × [(p×(odds-1) - (1-p)) / (odds-1)]
 • f_real > 6% → stake 5 (excepcional)
 Exposição simultânea máxima: 10% da banca. Após 3 perdas seguidas: reduza 50% por 24h.
 
+━━━ MÚLTIPLA INTELIGENTE (ACCUMULATOR) ━━━
+Após selecionar as apostas individuais, componha a MELHOR múltipla do dia:
+
+CRITÉRIOS OBRIGATÓRIOS:
+• 2 a 4 pernas — jamais mais de 4 (variância incontrolável acima disso)
+• Somente seleções com confidence ≥ 60% e probability ≥ 55%
+• Odds combinadas alvo: 2.50 a 9.00 (abaixo = retorno insuficiente; acima = risco excessivo)
+• Probabilidade combinada mínima: 25%
+• PROIBIDO combinar: jogos do mesmo campeonato na mesma rodada (árbitro/clima compartilhados), times da mesma cidade em jogos diferentes, dois 1X2 do mesmo lado (correlação narrativa)
+• Prefira AH e Over/Under — menor correlação estrutural que 1X2
+• Se Kelly combinado ≤ 0 → retorne "accumulator": null (sem edge real na combinação)
+
+CÁLCULOS OBRIGATÓRIOS:
+• combinedOdds = produto das odds de cada perna (ex: 1.85 × 1.72 = 3.18)
+• combinedProbability = produto das probabilidades em decimal × 100 (ex: 0.63 × 0.62 = 0.391 → 39%)
+• ev = round((combinedProbability/100 × combinedOdds − 1) × 100, 1)
+• kellyPct = round(25% × [(combinedProbability/100 × (combinedOdds−1) − (1−combinedProbability/100)) / (combinedOdds−1)], 2)
+• stake: sempre 1 (múltipla tem risco intrínseco — nunca mais que 1%)
+• correlationRisk: "baixo" | "médio" | "alto" — avalie independência estatística real
+
 ━━━ REGRAS ABSOLUTAS ━━━
 1. IDs e nomes EXATOS da lista fornecida. Nunca invente jogos.
 2. NUNCA retorne matches vazio — edge marginal = stake 1 + riskLevel "alto"
@@ -761,9 +781,10 @@ MERCADOS VÁLIDOS para "market": "AH -0.5", "AH +0.5", "AH -1.0", "AH -1.5", "Ov
 VALORES: consistencyScore inteiro 0-100 | ev 1.0-15.0 | stake 1-5 | probability 40-85 | confidence 50-90 | odds 1.30-4.00 | xgHome/xgAway 0.5-3.5 | kellyPct número real | clvEdge "alto"/"médio"/"baixo" | contextFlags array de strings | suspiciousMovement: true só se odds caíram >15% sem justificativa
 
 Resposta completa:
-{"type":"analysis","matches":[...],"dailySummary":"2-3 frases: volume do dia, qualidade geral, exposição total recomendada e CLV geral disponível","marketAlert":null}
+{"type":"analysis","matches":[...],"dailySummary":"2-3 frases: volume do dia, qualidade geral, exposição total recomendada e CLV geral disponível","marketAlert":null,"accumulator":{"legs":[{"matchId":"ID","homeTeam":"X","awayTeam":"Y","market":"Over 2.5","selection":"Over","odds":1.85,"probability":63}],"combinedOdds":3.18,"combinedProbability":39,"ev":8.5,"kellyPct":1.9,"stake":1,"confidence":66,"correlationRisk":"baixo","reasoning":"Por que essas seleções se combinam bem — máximo 2 frases."}}
 
-OBRIGATÓRIO: Se há jogos na lista, SEMPRE retorne análise. SEJA CONCISO nos textos para caber no limite de tokens."""
+OBRIGATÓRIO: Se há jogos na lista, SEMPRE retorne análise. SEJA CONCISO nos textos para caber no limite de tokens.
+accumulator: retorne null se não houver combinação com Kelly positivo e odds dentro de 2.50-9.00."""
 
 
 CHAT_SYSTEM_PROMPT = """Você é APEX TRADE — operador institucional de trading esportivo com 27 anos de experiência real. Opera capital próprio e de fundos privados em futebol europeu e sul-americano desde 1998.
@@ -801,7 +822,70 @@ suspiciousMovement, xgHome, xgAway, kellyPct, clvEdge, contextFlags[],
 reasoning, edge, entryTiming, exitCondition, mainRisk, anglesCount,
 opportunities:[{market,selection,odds}]
 
-JSON puro: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null}"""
+JSON puro: {"type":"analysis","matches":[...],"dailySummary":"...","marketAlert":null,"accumulator":{"legs":[...],"combinedOdds":X,"combinedProbability":X,"ev":X,"kellyPct":X,"stake":1,"confidence":X,"correlationRisk":"baixo","reasoning":"..."}|null}"""
+
+def sanitize_accumulator(acc, matches):
+    """Valida e sanitiza o campo accumulator retornado pelo AI."""
+    if not isinstance(acc, dict):
+        return None
+
+    legs = acc.get("legs", [])
+    if not isinstance(legs, list) or not (2 <= len(legs) <= 4):
+        return None
+
+    valid_legs = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        odds = _num(leg.get("odds"), 0, 1.10, 20.0)
+        prob = _num(leg.get("probability"), 0, 10, 95)
+        if odds < 1.10 or prob < 10:
+            continue
+        leg["odds"] = round(odds, 2)
+        leg["probability"] = int(prob)
+        valid_legs.append(leg)
+
+    if len(valid_legs) < 2:
+        return None
+
+    acc["legs"] = valid_legs
+
+    # Recalculate combined metrics from actual leg values
+    combined_odds = 1.0
+    combined_prob = 1.0
+    for leg in valid_legs:
+        combined_odds *= leg["odds"]
+        combined_prob *= leg["probability"] / 100.0
+
+    combined_odds = round(combined_odds, 2)
+    combined_prob_pct = round(combined_prob * 100, 1)
+
+    if not (1.50 <= combined_odds <= 20.0) or combined_prob_pct < 5:
+        return None
+
+    ev = round((combined_prob * combined_odds - 1) * 100, 1)
+    if combined_odds > 1:
+        kelly = 25 * (combined_prob * (combined_odds - 1) - (1 - combined_prob)) / (combined_odds - 1)
+    else:
+        kelly = 0.0
+    kelly = round(kelly, 2)
+
+    if kelly <= 0:
+        return None
+
+    acc["combinedOdds"]        = combined_odds
+    acc["combinedProbability"] = combined_prob_pct
+    acc["ev"]                  = max(0.1, min(100.0, ev))
+    acc["kellyPct"]            = kelly
+    acc["stake"]               = 1
+    acc["confidence"]          = int(_num(acc.get("confidence"), 62, 40, 90))
+    corr = acc.get("correlationRisk", "médio")
+    acc["correlationRisk"]     = corr if corr in ("baixo", "médio", "alto") else "médio"
+    if not isinstance(acc.get("reasoning"), str) or not acc["reasoning"].strip():
+        acc["reasoning"] = "Seleções com edge confirmado e correlação mínima entre pernas."
+
+    return acc
+
 
 def _groq_post(model, messages, max_tokens, temperature):
     return requests.post(
@@ -1920,6 +2004,14 @@ JSON puro, sem markdown. Tipo "analysis"."""
 
             parsed["matches"] = validate_opportunities(parsed["matches"])
             parsed["matches"] = sanitize_matches(parsed["matches"])
+
+            # Sanitize accumulator — drops it if Kelly ≤ 0 or legs invalid
+            raw_acc = parsed.get("accumulator")
+            if raw_acc is not None:
+                parsed["accumulator"] = sanitize_accumulator(raw_acc, parsed["matches"])
+            else:
+                parsed["accumulator"] = None
+
             parsed["validated"] = True
 
         return jsonify({"success": True, "result": parsed})
