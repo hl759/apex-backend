@@ -1968,7 +1968,6 @@ JSON puro, sem markdown. Tipo "analysis"."""
         # (acontece quando o modelo trunca e o walk-back falha), tenta extrair análise
         if parsed.get("type") == "chat":
             inner = parsed.get("message", "")
-            # Tenta parsear o message direto (pode ser o JSON completo)
             for candidate in (inner, raw):
                 c = candidate.strip()
                 if not c.startswith("{"):
@@ -1977,7 +1976,6 @@ JSON puro, sem markdown. Tipo "analysis"."""
                 if recovered.get("type") == "analysis":
                     parsed = recovered
                     break
-                # Última tentativa: json.loads direto em variações limpas
                 for attempt in (c, c.split("\n", 1)[-1].strip()):
                     try:
                         j = json.loads(attempt)
@@ -1988,6 +1986,18 @@ JSON puro, sem markdown. Tipo "analysis"."""
                         pass
                 if parsed.get("type") == "analysis":
                     break
+
+        # Garantia final: /analyze NUNCA retorna type "chat" — evita JSON bruto no frontend
+        # Se após todas as tentativas ainda não temos análise, devolve análise vazia
+        if parsed.get("type") != "analysis":
+            parsed = {
+                "type": "analysis",
+                "matches": [],
+                "dailySummary": "Análise indisponível neste momento — tente novamente em instantes.",
+                "marketAlert": None,
+                "accumulator": None,
+                "validated": True,
+            }
 
         # Validação 1: remove jogos inventados pelo AI
         if parsed.get("type") == "analysis":
